@@ -209,12 +209,38 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 }
 
 // resetTerminal puts the controlling terminal back into a sane state.
-// Some TUI agents leave the terminal in raw/alt-screen mode on crash;
-// this is harmless on a healthy terminal and a relief on a broken one.
+//
+// TUI apps (opencode, claude TUI, vim, etc.) toggle a bunch of terminal
+// modes on entry that they normally toggle off on exit. If they crash or
+// get killed mid-run, those modes stay on, leaving the terminal in a
+// weird state. `stty sane` only fixes tty settings (raw mode, echo) —
+// it does NOT undo the terminal-emulator mode switches. We have to send
+// the matching close sequences ourselves:
+//
+//	ESC[?1049l  leave alternate screen buffer
+//	ESC[?25h    show cursor
+//	ESC[?1000l  disable X11 mouse click tracking
+//	ESC[?1002l  disable X11 mouse drag tracking
+//	ESC[?1003l  disable X11 mouse-motion tracking (every move = garbage chars)
+//	ESC[?1006l  disable SGR extended mouse mode
+//	ESC[?1004l  disable focus in/out events
+//	ESC[!p      DECSTR soft reset (catches anything we missed)
+//
+// Combined with `stty sane` this restores a healthy terminal after any
+// kind of agent exit.
 func resetTerminal() {
-	reset := exec.Command("stty", "sane")
-	reset.Stdin = os.Stdin
-	_ = reset.Run()
+	const resetSeq = "\x1b[!p" +
+		"\x1b[?1049l" +
+		"\x1b[?25h" +
+		"\x1b[?1000l" +
+		"\x1b[?1002l" +
+		"\x1b[?1003l" +
+		"\x1b[?1006l" +
+		"\x1b[?1004l"
+	_, _ = os.Stderr.WriteString(resetSeq)
+	stty := exec.Command("stty", "sane")
+	stty.Stdin = os.Stdin
+	_ = stty.Run()
 }
 
 // vmNameForCommand returns the Lima VM name for a given command.

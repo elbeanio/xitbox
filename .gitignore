@@ -42,3 +42,4 @@ Thumbs.db
 # Downloaded artifacts
 *.tar.gz
 *.tar.gz.*
+.aider*
