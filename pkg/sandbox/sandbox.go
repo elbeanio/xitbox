@@ -387,13 +387,17 @@ func createLimaVM(vmName, agentName string) error {
 	// Use --mount-only for project dir (removes default home mount)
 	mounts := []string{cwd + ":w"}
 
-	// Add agent persist dir mount if this is a known agent
+	// Add agent persist dir mount if this is a known agent. We always
+	// mkdir the dir first so it exists inside the VM too — otherwise we'd
+	// either skip the mount (no persistence) or create a broken symlink
+	// later (ENOENT when the agent tries to write to ~/.<agent>).
 	if agentName != "" {
 		home, _ := os.UserHomeDir()
 		persistDir := filepath.Join(home, ".xitbox", "persist", agentName)
-		if _, err := os.Stat(persistDir); err == nil {
-			mounts = append(mounts, persistDir+":w")
+		if err := os.MkdirAll(persistDir, 0755); err != nil {
+			return fmt.Errorf("create persist dir %s: %w", persistDir, err)
 		}
+		mounts = append(mounts, persistDir+":w")
 	}
 	args = append(args, "--mount-only", strings.Join(mounts, ","))
 
@@ -410,10 +414,17 @@ func startLimaVM(vmName string) error {
 }
 
 func setupAgentSymlinks(vmName, agentName string) error {
-	// Create symlink from ~/.<agent> to the persist dir inside the VM.
-	// The persist dir is mounted at the same host path inside the VM.
+	// Create the persist dir on the host first. If we skip this and the dir
+	// doesn't exist, `ln -sf` produces a broken symlink inside the VM, and
+	// any agent that tries to write to ~/.<agent> at startup (e.g. gemini
+	// creating ~/.gemini for checkpointing) will hit ENOENT.
 	home, _ := os.UserHomeDir()
 	persistDir := filepath.Join(home, ".xitbox", "persist", agentName)
+	if err := os.MkdirAll(persistDir, 0755); err != nil {
+		return fmt.Errorf("create persist dir %s: %w", persistDir, err)
+	}
+	// Now create the symlink inside the VM. The persist dir is mounted at
+	// the same host path inside the VM, so the symlink resolves.
 	symlinkCmd := fmt.Sprintf("ln -sf %s ~/.%s", shQuote(persistDir), agentName)
 	return limaSilent("shell", vmName, "--", "sh", "-c", symlinkCmd)
 }
