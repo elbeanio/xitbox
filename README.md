@@ -9,12 +9,12 @@
 
 ## What is xitbox?
 
-**xitbox** runs AI coding agents (Claude Code, OpenCode, Codex, etc.) in ephemeral sandboxes with controlled network and filesystem access. It protects against accidental misuse — agents can't reach public LLM APIs, can't read your SSH keys, and can only touch files you explicitly allow.
+**xitbox** runs AI coding agents (Claude Code, Codex, Aider, Gemini, etc.) in ephemeral sandboxes with controlled network and filesystem access. It protects against accidental misuse — agents can't reach public LLM APIs, can't read your SSH keys, and can only touch files you explicitly allow.
 
 **Key idea:** Run any agent with `xitbox <agent>` (or `xitbox run -- <cmd>` for one-offs) and it runs inside a sandbox. When the command exits, the sandbox is gone.
 
 ```bash
-# Sandbox Claude Code (or: xitbox opencode, xitbox codex, xitbox aider)
+# Sandbox Claude Code (or: xitbox codex, xitbox aider, xitbox gemini)
 xitbox claude
 
 # Sandbox a one-off command
@@ -25,7 +25,7 @@ xitbox run --name frontend -- npm run dev
 xitbox run --name backend -- python server.py
 ```
 
-Use `--` to pass flags through to the agent, e.g. `xitbox claude -- --help` or `xitbox opencode -- --version`.
+Use `--` to pass flags through to the agent, e.g. `xitbox claude -- --help` or `xitbox gemini -- --version`.
 
 ---
 
@@ -77,7 +77,7 @@ This creates your default configuration, detects installed agents, and verifies 
 
 The agent starts inside a sandbox. Network access is default-deny. Filesystem access is restricted to your project directory and agent config persistence directories.
 
-On macOS, each agent gets its own dedicated Lima VM (e.g. `xitbox-claude`, `xitbox-opencode`) so credentials and config don't leak between agents. One-off commands share a default VM.
+On macOS, each agent gets its own dedicated Lima VM (e.g. `xitbox-claude`, `xitbox-gemini`) so credentials and config don't leak between agents. One-off commands share a default VM.
 
 ### Allow a blocked domain
 
@@ -124,7 +124,7 @@ When the agent hits a blocked domain, you'll see it in the session overlay (comi
 | **Network** | iptables transparent proxy | Same, inside VM |
 | **Filesystem** | bwrap bind mounts | virtiofs + bwrap |
 
-On macOS, xitbox uses lightweight Lima VMs. Each known agent (`claude`, `opencode`, `codex`, `aider`) gets its own persistent VM so credentials and config are isolated between agents. One-off commands share a default VM. The VM is the sandbox boundary; the host is never directly exposed to the agent.
+On macOS, xitbox uses lightweight Lima VMs. Each known agent (`claude`, `codex`, `aider`, `gemini`) gets its own persistent VM so credentials and config are isolated between agents. One-off commands share a default VM. The VM is the sandbox boundary; the host is never directly exposed to the agent.
 
 ---
 
@@ -160,7 +160,7 @@ filesystem:
   cwd: rw
   agent_persistence:
     claude: ~/.xitbox/persist/claude
-    opencode: ~/.xitbox/persist/opencode
+    gemini: ~/.xitbox/persist/gemini
 
 resources:
   memory: 4g
@@ -198,9 +198,9 @@ filesystem:
 | Command | Description |
 |---------|-------------|
 | `xitbox claude [args...]` | Run Claude Code in a sandboxed VM |
-| `xitbox opencode [args...]` | Run OpenCode in a sandboxed VM |
 | `xitbox codex [args...]` | Run Codex CLI in a sandboxed VM |
 | `xitbox aider [args...]` | Run Aider in a sandboxed VM |
+| `xitbox gemini [args...]` | Run Gemini CLI in a sandboxed VM |
 | `xitbox run -- <cmd>` | Run any command in an ephemeral sandbox |
 | `xitbox run --name foo -- <cmd>` | Run with a named sandbox |
 | `xitbox init` | Initialize configuration and check dependencies |
@@ -217,15 +217,18 @@ Each agent subcommand accepts the same `--name` flag as `xitbox run` and forward
 
 ## Agent Config Persistence
 
+> **Note: opencode is intentionally not supported.**
+> OpenCode's TUI (built on the `opentui` library) silently exits with code 255 over SSH/VM transports — same symptom as [opencode issues #6119](https://github.com/sst/opencode/issues/6119) and [#24475](https://github.com/sst/opencode/issues/24475). The same problems have been reported upstream on Gnome Terminal and other non-kitty hosts, so the root cause is in the library, not in xitbox. For opencode, run `opencode web` outside xitbox.
+
 xitbox automatically detects installed agents and persists their configuration across sandbox runs:
 
 | Agent | Persistent Config Dir |
 |-------|----------------------|
 | Claude Code | `~/.xitbox/persist/claude/` |
-| OpenCode | `~/.xitbox/persist/opencode/` |
-| Aider | `~/.xitbox/persist/aider/` |
 | Codex CLI | `~/.xitbox/persist/codex/` |
+| Aider | `~/.xitbox/persist/aider/` |
 | Cline | `~/.xitbox/persist/cline/` |
+| Gemini CLI | `~/.xitbox/persist/gemini/` |
 
 Inside the sandbox, these are mounted at the agent's expected home directory locations (e.g., `~/.claude/`).
 

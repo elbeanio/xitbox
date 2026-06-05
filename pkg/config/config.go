@@ -46,11 +46,11 @@ func DefaultConfig() *Config {
 		Filesystem: FilesystemConfig{
 			CWD: "rw",
 			AgentPersistence: map[string]string{
-				"claude":   defaultPersistPath("claude"),
-				"opencode": defaultPersistPath("opencode"),
-				"aider":    defaultPersistPath("aider"),
-				"codex":    defaultPersistPath("codex"),
-				"cline":    defaultPersistPath("cline"),
+				"claude": defaultPersistPath("claude"),
+				"aider":  defaultPersistPath("aider"),
+				"codex":  defaultPersistPath("codex"),
+				"cline":  defaultPersistPath("cline"),
+				"gemini": defaultPersistPath("gemini"),
 			},
 		},
 		Resources: ResourceConfig{

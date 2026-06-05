@@ -7,7 +7,7 @@ import (
 // agentNames lists the agents that get first-class subcommands.
 // The list is intentionally small: these are the agents xitbox knows how
 // to isolate via per-agent Lima VMs (see knownAgents in pkg/sandbox).
-var agentNames = []string{"claude", "opencode", "codex", "aider"}
+var agentNames = []string{"claude", "codex", "aider", "gemini"}
 
 func init() {
 	for _, agent := range agentNames {

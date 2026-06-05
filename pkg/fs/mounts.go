@@ -136,14 +136,14 @@ func agentHomePath(agent string) string {
 	switch agent {
 	case "claude":
 		return "/home/sandbox/.claude"
-	case "opencode":
-		return "/home/sandbox/.opencode"
 	case "aider":
 		return "/home/sandbox/.aider"
 	case "codex":
 		return "/home/sandbox/.codex"
 	case "cline":
 		return "/home/sandbox/.cline"
+	case "gemini":
+		return "/home/sandbox/.gemini"
 	}
 	return ""
 }

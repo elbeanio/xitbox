@@ -97,11 +97,11 @@ func check(name string, required bool, install string) Dependency {
 func detectAgents() []string {
 	var agents []string
 	candidates := map[string]string{
-		"claude":   ".claude",
-		"opencode": ".opencode",
-		"aider":    ".aider",
-		"codex":    ".codex",
-		"cline":    ".cline",
+		"claude": ".claude",
+		"aider":  ".aider",
+		"codex":  ".codex",
+		"cline":  ".cline",
+		"gemini": ".gemini",
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

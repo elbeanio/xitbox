@@ -191,7 +191,7 @@ Sandbox filesystem:
   /workspace           (bind mount: project CWD, read-write)
   /home/sandbox        (tmpfs)
   /home/sandbox/.claude ──▶ bind mount from ~/.xitbox/persist/claude/ (rw)
-  /home/sandbox/.opencode ──▶ bind mount from ~/.xitbox/persist/opencode/ (rw)
+  /home/sandbox/.gemini ──▶ bind mount from ~/.xitbox/persist/gemini/ (rw)
   /home/sandbox/.ssh   (not mounted by default; see bead Code-80f for future SSH support)
   /mnt/shared          (optional: additional user shares)
 ```

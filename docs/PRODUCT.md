@@ -7,7 +7,7 @@
 
 ## 1. Problem Statement
 
-AI coding agents (Claude Code, OpenCode, Codex, etc.) execute arbitrary code on your machine. They can:
+AI coding agents (Claude Code, Codex, Aider, Gemini, etc.) execute arbitrary code on your machine. They can:
 
 - Exfiltrate secrets via HTTP requests to public LLM APIs
 - Read SSH keys, AWS credentials, and `.env` files outside the project
@@ -49,7 +49,7 @@ Existing sandbox tools are either **too heavy** (full Docker/VM per session), **
 3. **Session chrome / overlay** — A lightweight UI wrapper around the sandboxed command shows blocked connection attempts in real-time and lets you allow them with a keystroke, without quitting the agent.
 4. **Transparent proxy with structured logging** — Every blocked connection attempt is logged to JSONL with reason, destination, and timestamp. A simple `xitbox allow --from-log` command adds it to the whitelist.
 5. **Identical UX on Linux and macOS** — One binary, one config format, one mental model.
-6. **Purpose-built for coding agents** — Not a generic sandbox. Knows about Claude Code, OpenCode, Aider, etc.
+6. **Purpose-built for coding agents** — Not a generic sandbox. Knows about Claude Code, Codex, Aider, Gemini, etc.
 7. **Session-scoped everything** — Sandboxes are ephemeral. When the agent exits, the sandbox is gone. No `stop` command needed.
 
 ---
@@ -69,7 +69,7 @@ Existing sandbox tools are either **too heavy** (full Docker/VM per session), **
 - **Default deny** outside the project working directory
 - **Working directory** mounted read-write by default
 - **Explicit shares** — additional host paths can be mounted read-only or read-write
-- **Agent config persistence** — automatically maps known agent config dirs (`~/.claude/`, `~/.opencode/`, etc.) to persistent host storage
+- **Agent config persistence** — automatically maps known agent config dirs (`~/.claude/`, `~/.gemini/`, etc.) to persistent host storage
 - **Device access denied** — `/dev` is minimal (null, zero, random, urandom, tty)
 - **No access to host secrets** — `~/.ssh`, `~/.aws`, `~/.npmrc` etc. are invisible unless explicitly shared
 
@@ -101,10 +101,10 @@ Existing sandbox tools are either **too heavy** (full Docker/VM per session), **
 ```bash
 $ xitbox init
 ✓ Created ~/.config/xitbox/default.yaml
-✓ Detected agents: claude, opencode
+✓ Detected agents: claude, gemini
 ✓ Created persistent config directories:
     ~/.xitbox/persist/claude/
-    ~/.xitbox/persist/opencode/
+    ~/.xitbox/persist/gemini/
 ✓ Lima VM 'xitbox' created (macOS) / bubblewrap verified (Linux)
 ```
 
@@ -223,7 +223,7 @@ filesystem:
   # Override here if you want to disable or remap.
   agent_persistence:
     claude: ~/.xitbox/persist/claude
-    opencode: ~/.xitbox/persist/opencode
+    gemini: ~/.xitbox/persist/gemini
 
 resources:
   memory: 4g
@@ -269,10 +269,12 @@ xitbox automatically detects and configures persistence for:
 | Agent | Config Dir | Notes |
 |-------|-----------|-------|
 | Claude Code | `~/.claude/` | Maps to `~/.xitbox/persist/claude/` |
-| OpenCode | `~/.opencode/` | Maps to `~/.xitbox/persist/opencode/` |
-| Aider | `~/.aider/` | Maps to `~/.xitbox/persist/aider/` |
 | Codex CLI | `~/.codex/` | Maps to `~/.xitbox/persist/codex/` |
+| Aider | `~/.aider/` | Maps to `~/.xitbox/persist/aider/` |
 | Cline | `~/.cline/` | Maps to `~/.xitbox/persist/cline/` |
+| Gemini CLI | `~/.gemini/` | Maps to `~/.xitbox/persist/gemini/` |
+
+> **Note:** OpenCode is intentionally not supported. Its TUI (built on the `opentui` library) silently exits with code 255 over SSH/VM transports — same symptom as [opencode issues #6119](https://github.com/sst/opencode/issues/6119) and [#24475](https://github.com/sst/opencode/issues/24475). The same problems have been reported upstream on Gnome Terminal and other non-kitty hosts, so the root cause is in the library, not in xitbox. For opencode, run `opencode web` outside xitbox.
 
 Users can add custom agents via config.
 

@@ -97,7 +97,7 @@
 |------|-------------|------------|
 | 5.1 | `xitbox allow` command | `--domain`, `--cidr`, `--from-log`, `--sandbox` scope |
 | 5.2 | `xitbox logs` command | Tail/follow JSONL logs, filter by sandbox, time, action |
-| 5.3 | Agent auto-detection | `init` detects claude, opencode, aider, codex, cline |
+| 5.3 | Agent auto-detection | `init` detects claude, gemini, aider, codex, cline |
 | 5.4 | Agent persistence mapping | Auto-create `~/.xitbox/persist/<agent>/`, bind into sandbox |
 | 5.5 | Session chrome integration | Overlay runs during sandbox, shows blocks, handles [a]llow key |
 | 5.6 | Default built-in whitelist | GitHub, npm, PyPI, crates.io, golang.org, etc. |

@@ -27,12 +27,20 @@ type Runtime struct {
 }
 
 // knownAgents maps common agent command names to their config directories.
+//
+// opencode is intentionally NOT listed. Its TUI (built on opentui) silently
+// exits with code 255 over SSH/VM transports, including inside the Lima
+// VM we provision — same symptom as opencode issues #6119 and #24475. The
+// same problems have been reported on Gnome Terminal and other non-kitty
+// hosts upstream, so the root cause is in the library, not in our setup.
+// The author has decided not to chase it. Use `opencode web` outside xitbox
+// or pick one of the other supported agents below.
 var knownAgents = map[string]string{
-	"opencode": ".opencode",
-	"claude":   ".claude",
-	"aider":    ".aider",
-	"codex":    ".codex",
-	"cline":    ".cline",
+	"claude": ".claude",
+	"aider":  ".aider",
+	"codex":  ".codex",
+	"cline":  ".cline",
+	"gemini": ".gemini",
 }
 
 // Start creates and runs a sandbox.
@@ -161,9 +169,8 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 	// Build env for the VM:
 	// - PATH: prepend $HOME/.local/bin so uv-installed tools (aider) are found
 	// - TERM/COLORTERM/TERM_PROGRAM: pass through from the host so TUIs can
-	//   detect terminal capabilities. Many TUI libs (e.g. opencode's opentui)
-	//   wait for capability-query responses and silently time out if the
-	//   VM has no TERM set.
+	//   detect terminal capabilities. Many TUI libs wait for capability-query
+	//   responses and silently time out if the VM has no TERM set.
 	// - HTTP_PROXY/HTTPS_PROXY: route traffic through the host guardian
 	hostTerm := os.Getenv("TERM")
 	if hostTerm == "" {
@@ -190,7 +197,8 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 	rt.Cmd = cmd
 
 	// Reset the host terminal after the child exits. TUI apps that crash
-	// (opencode, claude TUI) often leave the terminal in raw/alt-screen mode.
+	// (claude TUI, aider, gemini) often leave the terminal in raw/alt-screen
+	// mode. See resetTerminal for the full list of modes we clean up.
 	defer resetTerminal()
 
 	if err := cmd.Run(); err != nil {
@@ -203,12 +211,12 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 				fmt.Fprintf(os.Stderr, "\n⚠️  %s is not installed in the %s VM.\n", agent, vmName)
 				fmt.Fprintf(os.Stderr, "Install it with:\n")
 				switch agent {
-				case "opencode":
-					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g opencode-ai\n", vmName)
 				case "claude":
 					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g @anthropic-ai/claude-code\n", vmName)
 				case "codex":
 					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g @openai/codex\n", vmName)
+				case "gemini":
+					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g @google/gemini-cli\n", vmName)
 				case "aider":
 					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo apt-get install -y curl build-essential python3-dev pipx python3 git && pipx install uv && uv python install 3.12 && uv tool install --python 3.12 aider-chat\n", vmName)
 				default:
@@ -223,7 +231,7 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 
 // resetTerminal puts the controlling terminal back into a sane state.
 //
-// TUI apps (opencode, claude TUI, vim, etc.) toggle a bunch of terminal
+// TUI apps (claude, aider, gemini, vim, etc.) toggle a bunch of terminal
 // modes on entry that they normally toggle off on exit. If they crash or
 // get killed mid-run, those modes stay on, leaving the terminal in a
 // weird state. `stty sane` only fixes tty settings (raw mode, echo) —
@@ -412,13 +420,13 @@ func setupAgentSymlinks(vmName, agentName string) error {
 
 // bootstrapAgentVM installs the system packages a known agent needs.
 // This is a one-time setup that runs after the VM is first created.
-// npm-based agents (claude, opencode, codex) need nodejs + npm + git.
+// npm-based agents (claude, codex, gemini) need nodejs + npm + git.
 // aider uses uv (installed separately) which manages its own Python, but
-// tree-sitter is a C extension so we need a build toolchain on Ubuntu.
+// tree-sitter is a C extension so we need a build toolchain on Debian.
 func bootstrapAgentVM(vmName, agentName string) error {
 	var pkgs string
 	switch agentName {
-	case "claude", "opencode", "codex", "cline":
+	case "claude", "codex", "cline", "gemini":
 		pkgs = "nodejs npm git"
 	case "aider":
 		// build-essential + python3-dev: tree-sitter and other C extensions
@@ -438,8 +446,8 @@ func bootstrapAgentVM(vmName, agentName string) error {
 // installAgent installs the agent's binary inside the VM. One-time per VM,
 // runs after bootstrapAgentVM. Skipped if the agent is already installed.
 //
-// claude/opencode/codex install via npm; aider installs via uv (with uv
-// itself bootstrapped from the official installer).
+// claude/codex/gemini install via npm; aider installs via uv (with uv
+// itself bootstrapped from PyPI via pipx).
 func installAgent(vmName, agentName string) error {
 	// Skip if already installed — keeps re-runs cheap and survives VM restarts.
 	probe := exec.Command("limactl", "shell", vmName, "--", "sh", "-c", "command -v "+agentName)
@@ -452,10 +460,10 @@ func installAgent(vmName, agentName string) error {
 	switch agentName {
 	case "claude":
 		installCmd = "sudo npm install -g @anthropic-ai/claude-code"
-	case "opencode":
-		installCmd = "sudo npm install -g opencode-ai"
 	case "codex":
 		installCmd = "sudo npm install -g @openai/codex"
+	case "gemini":
+		installCmd = "sudo npm install -g @google/gemini-cli"
 	case "aider":
 		// Get uv via pipx (which is in apt). Pin --python 3.12 because
 		// aider-chat's pinned numpy 1.26.4 has cp312 wheels on aarch64
