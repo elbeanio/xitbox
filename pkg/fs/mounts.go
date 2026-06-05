@@ -3,6 +3,7 @@ package fs
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/iangeorge/xitbox/pkg/config"
 )
@@ -50,16 +51,37 @@ func PrepareMounts(cfg *config.Config, cwd string) []MountSpec {
 	}
 
 	// Essential system directories
+	// On macOS (Lima VM), always include /lib even if it doesn't exist on host
+	// because Alpine Linux needs it for dynamically linked binaries
+	hostOS := "unknown"
+	if runtime.GOOS == "darwin" {
+		hostOS = "darwin"
+	}
+
+	essential := []string{"/usr", "/bin", "/sbin", "/etc"}
+	for _, path := range essential {
+		if _, err := os.Stat(path); err == nil || hostOS == "darwin" {
+			mounts = append(mounts, MountSpec{
+				Source: path,
+				Dest:   path,
+				Mode:   "ro",
+			})
+		}
+	}
+	// /lib is always needed inside the VM (musl libc)
 	mounts = append(mounts, MountSpec{
-		Source: "/usr",
-		Dest:   "/usr",
+		Source: "/lib",
+		Dest:   "/lib",
 		Mode:   "ro",
 	})
-	mounts = append(mounts, MountSpec{
-		Source: "/etc",
-		Dest:   "/etc",
-		Mode:   "ro",
-	})
+	// /lib64 only on some systems (not macOS, not Alpine)
+	if _, err := os.Stat("/lib64"); err == nil {
+		mounts = append(mounts, MountSpec{
+			Source: "/lib64",
+			Dest:   "/lib64",
+			Mode:   "ro",
+		})
+	}
 
 	return mounts
 }

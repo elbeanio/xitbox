@@ -39,6 +39,15 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("✓ Created default config: %s\n", config.DefaultConfigPath())
 
+	// Copy Lima VM template on macOS
+	if info.IsDarwin() {
+		if err := copyLimaTemplate(); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  Could not copy Lima template: %v\n", err)
+		} else {
+			fmt.Println("✓ Copied Lima VM template")
+		}
+	}
+
 	// Detect and create agent persist dirs
 	if len(info.Agents) > 0 {
 		fmt.Printf("✓ Detected agents: %s\n", join(info.Agents, ", "))
@@ -95,4 +104,52 @@ func join(ss []string, sep string) string {
 		result += sep + s
 	}
 	return result
+}
+
+func copyLimaTemplate() error {
+	src := findLimaTemplateSource()
+	if src == "" {
+		return fmt.Errorf("template not found in source tree")
+	}
+
+	dstDir := filepath.Join(os.Getenv("HOME"), ".config", "xitbox", "init", "lima")
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return err
+	}
+
+	dst := filepath.Join(dstDir, "xitbox.yaml")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
+}
+
+func findLimaTemplateSource() string {
+	// Try locations relative to the binary
+	if exe, err := os.Executable(); err == nil {
+		candidates := []string{
+			filepath.Join(filepath.Dir(exe), "..", "init", "lima", "xitbox.yaml"),
+			filepath.Join(filepath.Dir(exe), "..", "..", "init", "lima", "xitbox.yaml"),
+			filepath.Join(filepath.Dir(exe), "init", "lima", "xitbox.yaml"),
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				return c
+			}
+		}
+	}
+
+	// Try source tree locations (when running via go run)
+	candidates := []string{
+		"init/lima/xitbox.yaml",
+		"../init/lima/xitbox.yaml",
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+
+	return ""
 }

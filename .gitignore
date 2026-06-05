@@ -39,3 +39,7 @@ Thumbs.db
 
 # Local test data
 /testdata/tmp/
+
+# Downloaded artifacts
+*.tar.gz
+*.tar.gz.*
