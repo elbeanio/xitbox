@@ -240,6 +240,14 @@ func ensureLimaVM(vmName, agentName string) error {
 		if err := createLimaVM(vmName, agentName); err != nil {
 			return fmt.Errorf("create vm: %w", err)
 		}
+		// Install system packages the agent needs (nodejs, python, etc.)
+		if agentName != "" {
+			if err := bootstrapAgentVM(vmName, agentName); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  Could not bootstrap agent packages: %v\n", err)
+				fmt.Fprintf(os.Stderr, "    You may need to install them manually:\n")
+				fmt.Fprintf(os.Stderr, "      limactl shell %s -- sudo apk add <packages>\n", vmName)
+			}
+		}
 		// Create symlinks for agent persist dirs inside the VM
 		if agentName != "" {
 			if err := setupAgentSymlinks(vmName, agentName); err != nil {
@@ -338,6 +346,26 @@ func setupAgentSymlinks(vmName, agentName string) error {
 	persistDir := filepath.Join(home, ".xitbox", "persist", agentName)
 	symlinkCmd := fmt.Sprintf("ln -sf %s ~/.%s", shQuote(persistDir), agentName)
 	return limaSilent("shell", vmName, "--", "sh", "-c", symlinkCmd)
+}
+
+// bootstrapAgentVM installs the system packages a known agent needs.
+// This is a one-time setup that runs after the VM is first created.
+// npm-based agents (claude, opencode, codex) need nodejs + npm + git.
+// python-based agents (aider) need python3 + py3-pip + git.
+func bootstrapAgentVM(vmName, agentName string) error {
+	var pkgs string
+	switch agentName {
+	case "claude", "opencode", "codex", "cline":
+		pkgs = "nodejs npm git"
+	case "aider":
+		pkgs = "python3 py3-pip git"
+	default:
+		// Unknown agent — install a sensible default
+		pkgs = "git curl"
+	}
+	fmt.Fprintf(os.Stderr, "📦  Installing %s packages in %s...\n", agentName, vmName)
+	cmd := fmt.Sprintf("sudo apk add --no-cache %s", pkgs)
+	return limaSilent("shell", vmName, "--", "sh", "-c", cmd)
 }
 
 // limaSilent runs a limactl command while hiding its (very verbose) output.
