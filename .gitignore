@@ -15,8 +15,7 @@
 go.work
 
 # Build artifacts
-/xitbox
-/xit-guardian
+/bin/
 /dist/
 
 # IDE

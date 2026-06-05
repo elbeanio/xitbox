@@ -55,13 +55,14 @@ Download the latest release for your platform, or build from source:
 ```bash
 git clone https://github.com/elbeanio/xitbox.git
 cd xitbox
-go build ./cmd/xitbox
+make
+./bin/xitbox --help    # or `make where` to see binary paths
 ```
 
 ### Initialize
 
 ```bash
-./xitbox init
+./bin/xitbox init
 ```
 
 This creates your default configuration, detects installed agents, and verifies dependencies.
@@ -69,9 +70,9 @@ This creates your default configuration, detects installed agents, and verifies 
 ### Run a sandboxed agent
 
 ```bash
-./xitbox claude
+./bin/xitbox claude
 # or equivalently:
-./xitbox run -- claude
+./bin/xitbox run -- claude
 ```
 
 The agent starts inside a sandbox. Network access is default-deny. Filesystem access is restricted to your project directory and agent config persistence directories.
@@ -84,10 +85,10 @@ When the agent hits a blocked domain, you'll see it in the session overlay (comi
 
 ```bash
 # Allow a domain for all future sessions
-./xitbox allow --domain api.example.com
+./bin/xitbox allow --domain api.example.com
 
 # Allow from the most recent log entry
-./xitbox allow --from-log
+./bin/xitbox allow --from-log
 ```
 
 ---
@@ -283,16 +284,21 @@ xitbox/
 
 ### Build
 
-```bash
-go build ./cmd/xitbox
-go build ./cmd/xit-guardian
-```
-
-### Test
+Both binaries are produced under `./bin/`:
 
 ```bash
-go test ./...
+make            # build xitbox + xit-guardian into ./bin/
+make xitbox     # build only xitbox
+make xit-guardian
+make check      # go vet + go test
+make clean      # remove ./bin/
+make where      # print absolute paths to the built binaries
+make install    # install to $(HOME)/go/bin (override with INSTALL_DIR=...)
 ```
+
+`xitbox` is the CLI; `xit-guardian` is the standalone proxy daemon (currently
+used as a library by `xitbox`, but also runnable on its own for the future
+transparent-proxy and system-service modes).
 
 ---
 
