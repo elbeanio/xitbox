@@ -55,6 +55,9 @@ func Start(name string, cfg *config.Config, info *platform.Info, command []strin
 	}
 	guardianAddr := guardianHost + ":" + guardianPort
 
+	// Debug: log detected platform
+	fmt.Fprintf(os.Stderr, "[xitbox] Platform: OS=%s, Darwin=%v, Linux=%v\n", info.OS, info.IsDarwin(), info.IsLinux())
+
 	rules := guardian.NewRules(cfg.Network.Allow, cfg.Network.DenyList)
 	server, err := guardian.NewServer(guardianAddr, controlSock, logPath, rules)
 	if err != nil {
