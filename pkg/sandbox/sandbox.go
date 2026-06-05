@@ -158,11 +158,24 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 		return err
 	}
 
-	// Build proxy env vars for the VM to route traffic through host guardian.
-	// Prepend $HOME/.local/bin so uv-installed tools (e.g. aider) are on PATH
-	// in the non-login shell that limactl shell spawns.
-	proxyEnv := fmt.Sprintf("PATH=$HOME/.local/bin:$PATH HTTP_PROXY=http://host.lima.internal:%s HTTPS_PROXY=http://host.lima.internal:%s NO_PROXY=localhost,127.0.0.1",
-		guardianPort, guardianPort)
+	// Build env for the VM:
+	// - PATH: prepend $HOME/.local/bin so uv-installed tools (aider) are found
+	// - TERM/COLORTERM/TERM_PROGRAM: pass through from the host so TUIs can
+	//   detect terminal capabilities. Many TUI libs (e.g. opencode's opentui)
+	//   wait for capability-query responses and silently time out if the
+	//   VM has no TERM set.
+	// - HTTP_PROXY/HTTPS_PROXY: route traffic through the host guardian
+	hostTerm := os.Getenv("TERM")
+	if hostTerm == "" {
+		hostTerm = "xterm-256color"
+	}
+	proxyEnv := fmt.Sprintf(
+		"PATH=$HOME/.local/bin:$PATH TERM=%s COLORTERM=%s TERM_PROGRAM=%s HTTP_PROXY=http://host.lima.internal:%s HTTPS_PROXY=http://host.lima.internal:%s NO_PROXY=localhost,127.0.0.1",
+		hostTerm,
+		envOr("COLORTERM", "truecolor"),
+		envOr("TERM_PROGRAM", "xitbox"),
+		guardianPort, guardianPort,
+	)
 
 	// Build the command: run inside VM with proxy env and cd to project dir
 	cwd, _ := os.Getwd()
@@ -494,6 +507,14 @@ func shQuote(s string) string {
 		return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
 	}
 	return s
+}
+
+// envOr returns the value of the host env var, or fallback if unset/empty.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func contains(s, substr string) bool {
