@@ -158,8 +158,10 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 		return err
 	}
 
-	// Build proxy env vars for the VM to route traffic through host guardian
-	proxyEnv := fmt.Sprintf("HTTP_PROXY=http://host.lima.internal:%s HTTPS_PROXY=http://host.lima.internal:%s NO_PROXY=localhost,127.0.0.1",
+	// Build proxy env vars for the VM to route traffic through host guardian.
+	// Prepend $HOME/.local/bin so uv-installed tools (e.g. aider) are on PATH
+	// in the non-login shell that limactl shell spawns.
+	proxyEnv := fmt.Sprintf("PATH=$HOME/.local/bin:$PATH HTTP_PROXY=http://host.lima.internal:%s HTTPS_PROXY=http://host.lima.internal:%s NO_PROXY=localhost,127.0.0.1",
 		guardianPort, guardianPort)
 
 	// Build the command: run inside VM with proxy env and cd to project dir
@@ -173,6 +175,10 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 	rt.Cmd = cmd
+
+	// Reset the host terminal after the child exits. TUI apps that crash
+	// (opencode, claude TUI) often leave the terminal in raw/alt-screen mode.
+	defer resetTerminal()
 
 	if err := cmd.Run(); err != nil {
 		// Provide helpful message for common agents not installed in VM
@@ -191,7 +197,7 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 				case "codex":
 					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g @openai/codex\n", vmName)
 				case "aider":
-					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sh -c \"apk add py3-pip && pip install aider-chat\"\n", vmName)
+					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo apt-get install -y curl build-essential python3-dev pipx python3 git && pipx install uv && uv python install 3.12 && uv tool install --python 3.12 aider-chat\n", vmName)
 				default:
 					fmt.Fprintf(os.Stderr, "  limactl shell %s -- <install-command>\n", vmName)
 				}
@@ -200,6 +206,15 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 		return fmt.Errorf("sandboxed command: %w", err)
 	}
 	return nil
+}
+
+// resetTerminal puts the controlling terminal back into a sane state.
+// Some TUI agents leave the terminal in raw/alt-screen mode on crash;
+// this is harmless on a healthy terminal and a relief on a broken one.
+func resetTerminal() {
+	reset := exec.Command("stty", "sane")
+	reset.Stdin = os.Stdin
+	_ = reset.Run()
 }
 
 // vmNameForCommand returns the Lima VM name for a given command.
@@ -246,6 +261,11 @@ func ensureLimaVM(vmName, agentName string) error {
 				fmt.Fprintf(os.Stderr, "⚠️  Could not bootstrap agent packages: %v\n", err)
 				fmt.Fprintf(os.Stderr, "    You may need to install them manually:\n")
 				fmt.Fprintf(os.Stderr, "      limactl shell %s -- sudo apk add <packages>\n", vmName)
+			}
+			// Install the agent itself (npm/uv). Skipped if already present.
+			if err := installAgent(vmName, agentName); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  Could not install %s: %v\n", agentName, err)
+				fmt.Fprintf(os.Stderr, "    The agent CLI is not available inside the VM.\n")
 			}
 		}
 		// Create symlinks for agent persist dirs inside the VM
@@ -330,7 +350,10 @@ func createLimaVM(vmName, agentName string) error {
 	}
 	args = append(args, "--mount-only", strings.Join(mounts, ","))
 
-	args = append(args, "template:alpine")
+	// Debian (glibc) base. Alpine is musl so no prebuilt wheels exist for
+	// aarch64 Python packages with C extensions (tree-sitter for aider, etc.).
+	// Debian is glibc and much lighter than Ubuntu (~400MB vs ~1GB base).
+	args = append(args, "template:debian")
 
 	return limaSilent(args...)
 }
@@ -351,21 +374,74 @@ func setupAgentSymlinks(vmName, agentName string) error {
 // bootstrapAgentVM installs the system packages a known agent needs.
 // This is a one-time setup that runs after the VM is first created.
 // npm-based agents (claude, opencode, codex) need nodejs + npm + git.
-// python-based agents (aider) need python3 + py3-pip + git.
+// aider uses uv (installed separately) which manages its own Python, but
+// tree-sitter is a C extension so we need a build toolchain on Ubuntu.
 func bootstrapAgentVM(vmName, agentName string) error {
 	var pkgs string
 	switch agentName {
 	case "claude", "opencode", "codex", "cline":
 		pkgs = "nodejs npm git"
 	case "aider":
-		pkgs = "python3 py3-pip git"
+		// build-essential + python3-dev: tree-sitter and other C extensions
+		// need a compiler and Python.h. pipx is the cleanest way to get uv
+		// installed in the VM — PyPI works over the default TLS, but the
+		// Debian image has a TLS 1.3 issue with astral.sh / GitHub that
+		// breaks the official uv installer.
+		pkgs = "python3 git curl build-essential python3-dev pipx"
 	default:
-		// Unknown agent — install a sensible default
 		pkgs = "git curl"
 	}
-	fmt.Fprintf(os.Stderr, "📦  Installing %s packages in %s...\n", agentName, vmName)
-	cmd := fmt.Sprintf("sudo apk add --no-cache %s", pkgs)
+	fmt.Fprintf(os.Stderr, "📦  Installing %s system packages in %s...\n", agentName, vmName)
+	cmd := fmt.Sprintf("sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends %s", pkgs)
 	return limaSilent("shell", vmName, "--", "sh", "-c", cmd)
+}
+
+// installAgent installs the agent's binary inside the VM. One-time per VM,
+// runs after bootstrapAgentVM. Skipped if the agent is already installed.
+//
+// claude/opencode/codex install via npm; aider installs via uv (with uv
+// itself bootstrapped from the official installer).
+func installAgent(vmName, agentName string) error {
+	// Skip if already installed — keeps re-runs cheap and survives VM restarts.
+	probe := exec.Command("limactl", "shell", vmName, "--", "sh", "-c", "command -v "+agentName)
+	probe.Stderr = &bytes.Buffer{}
+	if out, err := probe.Output(); err == nil && len(bytes.TrimSpace(out)) > 0 {
+		return nil
+	}
+
+	var installCmd string
+	switch agentName {
+	case "claude":
+		installCmd = "sudo npm install -g @anthropic-ai/claude-code"
+	case "opencode":
+		installCmd = "sudo npm install -g opencode-ai"
+	case "codex":
+		installCmd = "sudo npm install -g @openai/codex"
+	case "aider":
+		// Get uv via pipx (which is in apt). Pin --python 3.12 because
+		// aider-chat's pinned numpy 1.26.4 has cp312 wheels on aarch64
+		// linux but no cp313 wheels. Install as the user — uv tool
+		// binaries land in ~/.local/bin which the runDarwin shell wrapper
+		// prepends to PATH.
+		installCmd = `sh -c '
+			set -e
+			export TMPDIR=/tmp
+			export PATH="$HOME/.local/bin:$PATH"
+			if ! command -v uv >/dev/null 2>&1; then
+				pipx install uv
+			fi
+			uv python install 3.12 >/dev/null
+			uv tool install --python 3.12 aider-chat
+		'`
+	case "cline":
+		// Cline is a VS Code extension, not a CLI — nothing to install in the VM.
+		return nil
+	default:
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "📥  Installing %s in %s (this can take a minute)...\n", agentName, vmName)
+	return limaSilent("shell", vmName, "--", "sh", "-c", installCmd)
 }
 
 // limaSilent runs a limactl command while hiding its (very verbose) output.
