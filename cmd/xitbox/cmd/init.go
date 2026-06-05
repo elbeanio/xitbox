@@ -11,10 +11,12 @@ import (
 )
 
 var initCmd = &cobra.Command{
-	Use:   "init",
-	Short: "Initialize xitbox configuration and check dependencies",
-	Long:  `Creates the default configuration file, detects installed agents, and verifies that required dependencies are available.`,
-	RunE:  runInit,
+	Use:           "init",
+	Short:         "Initialize xitbox configuration and check dependencies",
+	Long:          `Creates the default configuration file, detects installed agents, and verifies that required dependencies are available.`,
+	RunE:          runInit,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func runInit(cmd *cobra.Command, args []string) error {

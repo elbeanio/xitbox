@@ -10,10 +10,12 @@ import (
 )
 
 var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List running sandboxes",
-	Long:  `Shows all currently running ephemeral sandboxes.`,
-	RunE:  runList,
+	Use:           "list",
+	Short:         "List running sandboxes",
+	Long:          `Shows all currently running ephemeral sandboxes.`,
+	RunE:          runList,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func runList(cmd *cobra.Command, args []string) error {

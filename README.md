@@ -11,11 +11,11 @@
 
 **xitbox** runs AI coding agents (Claude Code, OpenCode, Codex, etc.) in ephemeral sandboxes with controlled network and filesystem access. It protects against accidental misuse — agents can't reach public LLM APIs, can't read your SSH keys, and can only touch files you explicitly allow.
 
-**Key idea:** Prefix any command with `xitbox run --` and it runs inside a sandbox. When the command exits, the sandbox is gone.
+**Key idea:** Run any agent with `xitbox <agent>` (or `xitbox run -- <cmd>` for one-offs) and it runs inside a sandbox. When the command exits, the sandbox is gone.
 
 ```bash
-# Sandbox Claude Code
-xitbox run -- claude
+# Sandbox Claude Code (or: xitbox opencode, xitbox codex, xitbox aider)
+xitbox claude
 
 # Sandbox a one-off command
 xitbox run -- npm install
@@ -24,6 +24,8 @@ xitbox run -- npm install
 xitbox run --name frontend -- npm run dev
 xitbox run --name backend -- python server.py
 ```
+
+Use `--` to pass flags through to the agent, e.g. `xitbox claude -- --help` or `xitbox opencode -- --version`.
 
 ---
 
@@ -51,7 +53,7 @@ sudo dnf install bubblewrap iptables
 Download the latest release for your platform, or build from source:
 
 ```bash
-git clone https://github.com/iangeorge/xitbox.git
+git clone https://github.com/elbeanio/xitbox.git
 cd xitbox
 go build ./cmd/xitbox
 ```
@@ -67,10 +69,14 @@ This creates your default configuration, detects installed agents, and verifies 
 ### Run a sandboxed agent
 
 ```bash
+./xitbox claude
+# or equivalently:
 ./xitbox run -- claude
 ```
 
 The agent starts inside a sandbox. Network access is default-deny. Filesystem access is restricted to your project directory and agent config persistence directories.
+
+On macOS, each agent gets its own dedicated Lima VM (e.g. `xitbox-claude`, `xitbox-opencode`) so credentials and config don't leak between agents. One-off commands share a default VM.
 
 ### Allow a blocked domain
 
@@ -117,7 +123,7 @@ When the agent hits a blocked domain, you'll see it in the session overlay (comi
 | **Network** | iptables transparent proxy | Same, inside VM |
 | **Filesystem** | bwrap bind mounts | virtiofs + bwrap |
 
-On macOS, xitbox uses a lightweight Lima VM. The VM runs continuously and is shared across all sandboxes. Each sandbox still gets independent namespaces inside the VM.
+On macOS, xitbox uses lightweight Lima VMs. Each known agent (`claude`, `opencode`, `codex`, `aider`) gets its own persistent VM so credentials and config are isolated between agents. One-off commands share a default VM. The VM is the sandbox boundary; the host is never directly exposed to the agent.
 
 ---
 
@@ -190,15 +196,21 @@ filesystem:
 
 | Command | Description |
 |---------|-------------|
-| `xitbox init` | Initialize configuration and check dependencies |
-| `xitbox run -- <cmd>` | Run a command in an ephemeral sandbox |
+| `xitbox claude [args...]` | Run Claude Code in a sandboxed VM |
+| `xitbox opencode [args...]` | Run OpenCode in a sandboxed VM |
+| `xitbox codex [args...]` | Run Codex CLI in a sandboxed VM |
+| `xitbox aider [args...]` | Run Aider in a sandboxed VM |
+| `xitbox run -- <cmd>` | Run any command in an ephemeral sandbox |
 | `xitbox run --name foo -- <cmd>` | Run with a named sandbox |
+| `xitbox init` | Initialize configuration and check dependencies |
 | `xitbox list` | List currently running sandboxes |
 | `xitbox allow --domain <domain>` | Add a domain to the whitelist |
 | `xitbox allow --cidr <range>` | Add a CIDR range to the whitelist |
 | `xitbox allow --from-log` | Allow the most recently blocked destination |
 | `xitbox logs --since 5m` | View blocked connection attempts |
 | `xitbox logs --follow` | Follow log output in real-time |
+
+Each agent subcommand accepts the same `--name` flag as `xitbox run` and forwards everything after `--` to the agent itself.
 
 ---
 

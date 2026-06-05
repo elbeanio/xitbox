@@ -19,7 +19,9 @@ and cleans up when the command exits. Network is default-deny; use
 	Example: `  xitbox run -- claude
   xitbox run --name frontend -- npm run dev
   xitbox run -- echo "hello from sandbox"`,
-	RunE: runRun,
+	RunE:          runRun,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 var (

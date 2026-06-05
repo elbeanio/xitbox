@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -63,9 +64,6 @@ func Start(name string, cfg *config.Config, info *platform.Info, command []strin
 		guardianHost = "0.0.0.0"
 	}
 	guardianAddr := guardianHost + ":" + guardianPort
-
-	// Debug: log detected platform
-	fmt.Fprintf(os.Stderr, "[xitbox] Platform: OS=%s, Darwin=%v, Linux=%v\n", info.OS, info.IsDarwin(), info.IsLinux())
 
 	rules := guardian.NewRules(cfg.Network.Allow, cfg.Network.DenyList)
 	server, err := guardian.NewServer(guardianAddr, controlSock, logPath, rules)
@@ -180,7 +178,9 @@ func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []s
 		// Provide helpful message for common agents not installed in VM
 		if len(command) > 0 {
 			agent := command[0]
-			if check, _ := exec.Command("limactl", "shell", vmName, "--", "sh", "-c", "command -v "+agent).Output(); len(check) == 0 {
+			probe := exec.Command("limactl", "shell", vmName, "--", "sh", "-c", "command -v "+agent)
+			probe.Stderr = &bytes.Buffer{}
+			if check, _ := probe.Output(); len(check) == 0 {
 				fmt.Fprintf(os.Stderr, "\n⚠️  %s is not installed in the %s VM.\n", agent, vmName)
 				fmt.Fprintf(os.Stderr, "Install it with:\n")
 				switch agent {
@@ -324,19 +324,11 @@ func createLimaVM(vmName, agentName string) error {
 
 	args = append(args, "template:alpine")
 
-	cmd := exec.Command("limactl", args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return limaSilent(args...)
 }
 
 func startLimaVM(vmName string) error {
-	cmd := exec.Command("limactl", "start", vmName)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return limaSilent("start", vmName)
 }
 
 func setupAgentSymlinks(vmName, agentName string) error {
@@ -345,9 +337,25 @@ func setupAgentSymlinks(vmName, agentName string) error {
 	home, _ := os.UserHomeDir()
 	persistDir := filepath.Join(home, ".xitbox", "persist", agentName)
 	symlinkCmd := fmt.Sprintf("ln -sf %s ~/.%s", shQuote(persistDir), agentName)
-	cmd := exec.Command("limactl", "shell", vmName, "--", "sh", "-c", symlinkCmd)
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return limaSilent("shell", vmName, "--", "sh", "-c", symlinkCmd)
+}
+
+// limaSilent runs a limactl command while hiding its (very verbose) output.
+// If the command fails, the captured output is shown so the user can debug.
+func limaSilent(args ...string) error {
+	cmd := exec.Command("limactl", args...)
+	cmd.Env = os.Environ()
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		out := strings.TrimSpace(buf.String())
+		if out == "" {
+			return fmt.Errorf("limactl %s: %w", strings.Join(args, " "), err)
+		}
+		return fmt.Errorf("limactl %s: %w\n%s", strings.Join(args, " "), err, out)
+	}
+	return nil
 }
 
 // shQuote quotes a string for safe use in a shell command.

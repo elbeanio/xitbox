@@ -13,14 +13,12 @@ import (
 )
 
 var allowCmd = &cobra.Command{
-	Use:   "allow [flags]",
-	Short: "Add a domain or IP to the whitelist",
-	Long: `Updates the whitelist to allow outbound connections to a domain,
-CIDR, or the most recently blocked destination from the logs.`,
-	Example: `  xitbox allow --domain api.example.com
-  xitbox allow --cidr 10.0.0.0/8
-  xitbox allow --from-log`,
-	RunE: runAllow,
+	Use:           "allow",
+	Short:         "Add a domain or IP to the whitelist",
+	Long:          `Whitelists a domain, CIDR, or recent log entry. Modifies the xitbox config file.`,
+	RunE:          runAllow,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 var (

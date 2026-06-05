@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -197,7 +198,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	}
 
 	// Connect to destination
-	destAddr := fmt.Sprintf("%s:%d", destHost, destPort)
+	destAddr := net.JoinHostPort(destHost, strconv.Itoa(destPort))
 	serverConn, err := net.Dial("tcp", destAddr)
 	if err != nil {
 		log.Printf("connect to %s: %v", destAddr, err)

@@ -13,12 +13,12 @@ import (
 )
 
 var logsCmd = &cobra.Command{
-	Use:   "logs [flags]",
-	Short: "View blocked connection attempts",
-	Long:  `Reads the JSONL audit log of denied connections.`,
-	Example: `  xitbox logs --since 5m
-  xitbox logs --follow`,
-	RunE: runLogs,
+	Use:           "logs",
+	Short:         "View blocked connection attempts",
+	Long:          `Tails the JSONL audit log of blocked network connections from the guardian proxy.`,
+	RunE:          runLogs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 var (
