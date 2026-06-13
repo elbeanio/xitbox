@@ -86,7 +86,7 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Config is the top-level configuration for xitbox.
+// Config is the top-level configuration for xb.
 type Config struct {
 	Network    NetworkConfig    `yaml:"network"`
 	Filesystem FilesystemConfig `yaml:"filesystem"`
@@ -160,7 +160,7 @@ func Load(projectDir string, overrides map[string]interface{}) (*Config, error) 
 
 	// Load project config if it exists
 	if projectDir != "" {
-		projectPath := filepath.Join(projectDir, ".xitbox.yaml")
+		projectPath := filepath.Join(projectDir, ".xb.yaml")
 		if _, err := os.Stat(projectPath); err == nil {
 			data, err := os.ReadFile(projectPath)
 			if err != nil {
@@ -197,27 +197,27 @@ func (c *Config) SaveDefault() error {
 func DefaultConfigPath() string {
 	if runtime.GOOS == "darwin" {
 		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "Library", "Application Support", "xitbox", "default.yaml")
+		return filepath.Join(home, "Library", "Application Support", "xb", "default.yaml")
 	}
 	// Linux and others
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "xitbox", "default.yaml")
+		return filepath.Join(xdg, "xb", "default.yaml")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "xitbox", "default.yaml")
+	return filepath.Join(home, ".config", "xb", "default.yaml")
 }
 
 // defaultLogPath returns the default log file path.
 func defaultLogPath() string {
 	if runtime.GOOS == "darwin" {
 		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "Library", "Logs", "xitbox", "denied.jsonl")
+		return filepath.Join(home, "Library", "Logs", "xb", "denied.jsonl")
 	}
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "xitbox", "denied.jsonl")
+		return filepath.Join(xdg, "xb", "denied.jsonl")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "xitbox", "denied.jsonl")
+	return filepath.Join(home, ".local", "share", "xb", "denied.jsonl")
 }
 
 // defaultPersistPath returns the default persistence directory for an agent.
