@@ -1,4 +1,4 @@
-# xitbox — Architecture Document
+# xb — Architecture
 
 > How the pieces fit together.
 
@@ -7,424 +7,337 @@
 ## 1. System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              HOST                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                     xitbox CLI (Go)                             │    │
-  │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐     │    │
-  │  │  │  init    │  │  run     │  │  allow   │  │   logs       │     │    │
-  │  │  └──────────┘  └──────────┘  └──────────┘  └──────────────┘     │    │
-  │  │                                                                  │    │
-  │  │  ┌──────────────────────────────────────────────────────────┐  │    │
-  │  │  │              Session Chrome (terminal overlay)             │  │    │
-  │  │  │   Shows blocked attempts, accepts [a]llow/[i]gnore keys   │  │    │
-  │  │  └──────────────────────────────────────────────────────────┘  │    │
-│  │                                                                 │    │
-│  │  ┌─────────────────────────────────────────────────────────┐    │    │
-│  │  │              Config Manager (YAML)                      │    │    │
-│  │  │   Merges ~/.config/xitbox/default.yaml                │    │    │
-│  │  │   with ./.xitbox.yaml and CLI flags                   │    │    │
-│  │  └─────────────────────────────────────────────────────────┘    │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              xit-guardian (Go proxy)                          │    │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐ │    │
-│  │  │  Whitelist   │  │  Blocklist   │  │  JSONL Audit Log   │ │    │
-│  │  │  Engine      │  │  (LLMs)      │  │                    │ │    │
-│  │  └──────────────┘  └──────────────┘  └──────────────────────┘ │    │
-│  │                                                                 │    │
-│  │  Listens on: 127.0.0.1:<random> (per-sandbox)                  │    │
-│  │  API socket:  /tmp/xitbox-<name>/guardian.sock                 │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │         Platform Backend (Linux native / Lima on macOS)        │    │
-│  │                                                                 │    │
-│  │   Linux:  bubblewrap + unshare --net + veth + iptables         │    │
-│  │   macOS:  limactl exec inside shared Lima VM                   │    │
-│  │           (same Linux stack runs inside VM)                    │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  HOST                                                        │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  xb CLI                                              │   │
+│  │  stdlib flag dispatch — management flags or sandbox  │   │
+│  │                                                      │   │
+│  │  --allow  --logs  --list   xb <command> [args...]    │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  xit-guardian (per-sandbox proxy)                    │   │
+│  │  ├─ Allowlist + LLM blocklist                        │   │
+│  │  ├─ TLS SNI extraction (no decryption)               │   │
+│  │  ├─ HTTP CONNECT handling                            │   │
+│  │  ├─ Optional upstream proxy (corp proxy chaining)    │   │
+│  │  ├─ JSONL audit log                                  │   │
+│  │  └─ Unix socket control API (live rule updates)      │   │
+│  │                                                      │   │
+│  │  TCP listener:   127.0.0.1:<random-port>             │   │
+│  │  Control socket: ~/.xb/sandboxes/<name>/guardian.sock│   │
+│  │  Proxy socket:   ~/.xb/sandboxes/<name>/guardian-    │   │
+│  │                  proxy.sock  (Linux relay mode only) │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  Platform backend                                    │   │
+│  │                                                      │   │
+│  │  macOS:  Seatbelt (sandbox-exec) — instant startup   │   │
+│  │  Linux:  bwrap + network namespace                   │   │
+│  │          (pasta / slirp4netns / relay fallback)      │   │
+│  └──────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 2. Components
 
-### 2.1 xitbox CLI
+### 2.1 xb CLI (`cmd/xb/`)
 
-The user-facing command-line tool. Responsibilities:
-- Parse CLI flags and config files
-- Coordinate platform backend startup
-- Manage sandbox lifecycle (start, list)
-- Communicate with `xit-guardian` for dynamic rule updates
-- Stream logs to the user
+Entry point. Parses args with stdlib `flag` (no cobra). The first non-flag argument is treated as the command to sandbox; management operations use `--allow`, `--logs`, `--list` flags.
 
-### 2.2 xit-guardian
+Also contains the internal relay binary (`--xb-internal-relay PORT SOCKET`) used in Linux relay mode — see §4.3.
 
-A TCP proxy that is the **sole network gateway** for each sandbox. Runs on the host (or inside the Lima VM on macOS).
+### 2.2 xit-guardian (`cmd/xit-guardian/`, `pkg/guardian/`)
 
-Responsibilities:
-- Accept connections from the sandboxed process
-- Match destination against whitelist/blocklist
-- Forward allowed traffic to the real internet
-- Log denied connections to structured JSONL
-- Expose a Unix socket API for live rule updates
+A TCP proxy that is the **sole network exit point** for each sandbox. Key properties:
 
-**Why a proxy instead of iptables-only?**
-- iptables can only filter by IP/CIDR, not domain
-- A proxy sees the hostname (from HTTP Host header or TLS SNI) before the connection is established
-- We can log the *intended* destination, not just the resolved IP
+- Inspects destinations by hostname (HTTP CONNECT tunnel, TLS SNI, or HTTP Host header) — never decrypts
+- Checks deny list first, then allowlist; default deny
+- Logs every decision to JSONL
+- Accepts live rule updates via a Unix socket control API
+- Optionally chains through an upstream proxy (for corp environments)
 
-**Proxy modes:**
-- **Transparent mode** (Linux): `iptables -t nat` redirects all TCP traffic to the proxy. The sandboxed process doesn't know a proxy exists.
-- **Explicit mode** (fallback): Set `HTTP_PROXY`/`HTTPS_PROXY` env vars inside the sandbox to point to the guardian.
+See `docs/NETWORKING.md` for full protocol detail.
 
-### 2.3 Linux Backend
+### 2.3 macOS backend (`pkg/sandbox/sandbox.go`)
 
-Native Linux sandboxing using:
-- **`bubblewrap` (`bwrap`)**: Filesystem isolation via mount namespaces
-- **`unshare --net`**: Network namespace isolation
-- **`veth` pair + bridge**: Connects sandbox network namespace to host
-- **`iptables`**: Transparently redirects all TCP to xit-guardian
-- **cgroups v2**: Memory, CPU, and PID limits
-- **`pasta` (or `slirp4netns`)**: Optional userspace networking if rootless
+Uses **Seatbelt** (`sandbox-exec`) with a per-run profile written to a temp file:
 
-### 2.4 macOS Backend
+```scheme
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath "/path/to/cwd"))
+(allow file-write* (subpath "/path/to/agent-config"))  ; e.g. ~/.claude
+(allow file-write* (subpath "/tmp"))
+(allow file-write* (subpath "/private/tmp"))
+(allow file-write* (regex #"^/private/var/folders/"))
+(deny network-outbound)
+(allow network-outbound (remote tcp4 "localhost:GUARDIAN_PORT"))
+(allow network-outbound (remote unix-socket))   ; macOS system IPC + DNS
+```
 
-Since macOS lacks Linux namespaces, we run the **entire Linux backend inside a Lima VM**:
-- **Lima VM**: Lightweight Alpine Linux VM using Apple Virtualization.framework (vz driver)
-- **virtiofs**: Fast file sharing from macOS host into VM
-- **Shared VM**: One `xitbox` Lima VM runs continuously. Multiple sandboxes are independent Linux namespaces inside it.
-- **Port forwarding**: Guardian proxy ports are forwarded from VM to host via Lima's built-in mechanism
+No external dependencies. Instant startup. `sandbox-exec` is built into macOS.
 
-**Why Lima and not Colima?**
-- Colima is optimized for Docker daemon + container workloads
-- xitbox needs a minimal Linux environment with namespace support, not a container runtime
-- A dedicated VM keeps xitbox independent of Colima's lifecycle and version
-- The VM can be very small (~512MB RAM, Alpine base)
+### 2.4 Linux backend (`pkg/sandbox/sandbox_linux.go`)
+
+Three modes, tried in order:
+
+**pasta mode** (preferred):
+1. bwrap starts with `--unshare-user --uid 0 --gid 0 --unshare-net` — sandbox owns its network namespace
+2. Sandbox writes its PID to the shared state dir, waits for a ready signal
+3. Host runs `pasta --config-net --netns /proc/<pid>/ns/net`
+4. Host signals ready; sandbox brings up the tap interface
+5. iptables DNAT inside the sandbox redirects all TCP to guardian via pasta gateway (`10.0.2.2`)
+6. `HTTP_PROXY` also set as belt-and-suspenders for well-behaved tools
+
+**slirp4netns mode** (fallback if pasta not found): same pattern with `slirp4netns --configure`.
+
+**Relay mode** (zero external deps fallback):
+- `bwrap --unshare-net` — completely isolated network namespace, no internet
+- xb binary bind-mounted as `/xb-bin`; state dir bind-mounted as `/xb-state`
+- Relay (`/xb-bin --xb-internal-relay PORT /xb-state/guardian-proxy.sock`) starts as a background process inside the sandbox
+- Relay bridges sandbox TCP loopback → guardian's Unix socket on the shared state dir
+- Processes that respect `HTTP_PROXY` are filtered by guardian
+- Processes that ignore it (JVMs, raw sockets) get connection refused
 
 ---
 
 ## 3. Network Architecture
 
-### Linux — Transparent Proxy
+### macOS
 
 ```
-┌─────────────────┐         ┌──────────────────┐         ┌──────────────┐
-│  Sandbox (bwrap)│         │  Host Network    │         │  Internet      │
-│                 │         │                  │         │              │
-│  ┌───────────┐  │  veth │  ┌────────────┐  │         │  github.com  │
-│  │ App       │──┼───────┼──┤ iptables   │  │         │  npmjs.org   │
-│  │ (agent)   │  │  pair │  │ REDIRECT   │  │         │  ...         │
-│  └───────────┘  │         │  to :<guard> │  │         │              │
-│                 │         └──────┬───────┘  │         │              │
-│  Network NS     │                │          │         │              │
-│  (isolated)     │                ▼          │         │              │
-└─────────────────┘         ┌──────────────┐   │         └──────────────┘
-                            │ xit-guardian │   │
-                            │  :<port>     │───┘
-                            └──────────────┘
-                              │
-                              ▼
-                    ┌─────────────────────┐
-                    │ Whitelist?          │
-                    │ Blocklist?          │
-                    │ Log to JSONL        │
-                    └─────────────────────┘
+sandboxed process
+  │
+  │  (Seatbelt blocks all outbound except localhost:GUARDIAN_PORT)
+  ▼
+guardian on host (127.0.0.1:PORT)
+  │
+  │  check allowlist/blocklist
+  │  optionally forward through upstream_proxy
+  ▼
+internet (or corp proxy)
 ```
 
-**iptables rules** (set up per-sandbox):
-```bash
-# Create veth pair: veth-sandbox <-> veth-host
-# Move veth-sandbox into sandbox network namespace
-# Bridge veth-host to host network
-
-# Redirect all TCP traffic from sandbox to guardian
-iptables -t nat -A XITBOX-<name> -p tcp -j REDIRECT --to-port <guardian-port>
-```
-
-### macOS — Lima VM + Internal Proxy
+### Linux — pasta/slirp4netns mode
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          macOS HOST                                 │
-│                                                                     │
-│  ┌─────────────┐         ┌─────────────────────────┐                │
-│  │ xitbox CLI  │────────▶│ Lima VM 'xitbox'        │                │
-│  └─────────────┘  limactl│  (Alpine Linux)         │                │
-│                          │                         │                │
-│                          │  ┌───────────────────┐   │                │
-│                          │  │ Linux Backend     │   │                │
-│                          │  │ (same as native)  │   │                │
-│                          │  │                   │   │                │
-│                          │  │  bwrap + unshare  │   │                │
-│                          │  │  veth + iptables  │   │                │
-│                          │  │  xit-guardian     │   │                │
-│                          │  └───────────────────┘   │                │
-│                          └─────────────────────────┘                │
-│                                                                     │
-│  virtiofs mounts:                                                   │
-│    /Users/iangeorge/Code/myproject  ──▶ /mnt/project              │
-│    ~/.xitbox/persist/claude         ──▶ /home/sandbox/.claude     │
-└─────────────────────────────────────────────────────────────────────┘
+sandboxed process (network namespace)
+  │
+  │  (iptables DNAT: all TCP → pasta gateway:GUARDIAN_PORT)
+  ▼
+pasta/slirp4netns gateway (10.0.2.2:GUARDIAN_PORT)
+  │
+  │  (pasta routes to host loopback)
+  ▼
+guardian on host (127.0.0.1:PORT)
+  │
+  ▼
+internet
 ```
 
-The guardian runs **inside the Lima VM** and forwards traffic through the VM's NAT. Blocked attempts are logged to a file inside the VM, and `xitbox logs` reads it via `limactl copy` or a mounted log directory.
+### Linux — relay mode
+
+```
+sandboxed process (--unshare-net: isolated loopback, no internet)
+  │
+  │  HTTP_PROXY=http://127.0.0.1:RELAY_PORT
+  ▼
+relay (inside sandbox, 127.0.0.1:RELAY_PORT)
+  │
+  │  (filesystem Unix socket in shared state dir)
+  ▼
+guardian Unix socket (~/.xb/sandboxes/<name>/guardian-proxy.sock)
+  │
+  ▼
+internet
+```
+
+### Corporate proxy chaining
+
+When `upstream_proxy` is configured, guardian routes allowed traffic through it using HTTP CONNECT:
+
+```
+sandboxed process → guardian → upstream_proxy → internet
+```
+
+Basic auth is supported: `http://user:pass@proxy.corp.internal:8080`.
 
 ---
 
 ## 4. Filesystem Architecture
 
-### Linux — bwrap Mounts
+### macOS — Seatbelt
+
+The Seatbelt profile grants:
+- Read access to everything on the host (tools need their system deps)
+- Write access only to: cwd, agent config dir (e.g. `~/.claude`), `/tmp`, macOS temp dirs
+- Network outbound only to guardian port
+
+No path remapping. The agent writes directly to its real config dir on the host, which persists naturally across runs.
+
+### Linux — bwrap mounts
 
 ```
 Sandbox filesystem:
-  /                    (tmpfs, minimal)
-  /tmp                 (tmpfs)
-  /dev                 (minimal devtmpfs: null, zero, random, urandom, tty)
-  /proc                (procfs, hidepid=2)
-  /etc                 (minimal: passwd, hosts, resolv.conf)
-  /usr                 (read-only from host, or minimal busybox)
-  /workspace           (bind mount: project CWD, read-write)
-  /home/sandbox        (tmpfs)
-  /home/sandbox/.claude ──▶ bind mount from ~/.xitbox/persist/claude/ (rw)
-  /home/sandbox/.gemini ──▶ bind mount from ~/.xitbox/persist/gemini/ (rw)
-  /home/sandbox/.ssh   (not mounted by default; see bead Code-80f for future SSH support)
-  /mnt/shared          (optional: additional user shares)
+  /workspace      → bind mount: project cwd (rw)
+  /tmp            → tmpfs
+  /home/sandbox   → tmpfs
+  /dev            → minimal (null, zero, random, urandom, tty)
+  /proc           → procfs
+  /usr /bin /etc  → bind from host (ro)
+  /xb-bin         → xb binary (ro) — relay mode only
+  /xb-state       → state dir (rw) — relay mode only
 ```
 
-**Key decisions:**
-- `/usr` is bind-mounted read-only from host (or a minimal copy) so binaries work
-- No access to `/sys` beyond what's absolutely necessary
-- No access to host `/home` except explicitly shared paths
-- Agent home is a tmpfs with persistent config dirs bind-mounted in
+Agent config directories (`~/.claude`, `~/.gemini`, etc.) are accessible at their real host paths — bwrap maps the host home directory. The agent writes directly to its config dir.
 
-### macOS — virtiofs + bwrap
+### Project config read-only protection
 
-Same bwrap mount structure, but the source directories are virtiofs mounts from the macOS host into the Lima VM:
-
-```
-macOS host path                    Lima VM path
-─────────────────────────────────────────────────────────────────
-/Users/iangeorge/Code/myproject    /mnt/host/project
-/Users/iangeorge/.xitbox/persist   /mnt/host/persist
-```
-
-Inside the VM, bwrap bind-mounts from `/mnt/host/...` into the sandbox.
+`.xitbox.yaml` in the project directory is bind-mounted **read-only** inside the sandbox, even though the rest of cwd is read-write. This prevents the sandboxed process from modifying allow rules for future sandbox runs.
 
 ---
 
 ## 5. Data Flows
 
-### 5.1 Sandbox Startup
+### Sandbox startup
 
 ```
-1. User runs: xitbox run --name foo -- claude
-2. xitbox CLI reads config (default + project + CLI flags)
-3. xitbox starts xit-guardian on a random localhost port
-4. xit-guardian loads whitelist/blocklist from config
-5. xitbox creates network namespace (Linux) or uses VM (macOS)
-6. xitbox sets up iptables REDIRECT rules (Linux)
-7. xitbox prepares bwrap mount flags:
-     - bind CWD to /workspace (rw)
-     - bind persist dirs to agent home (rw)
-     - bind /usr from host (ro)
-     - tmpfs for /tmp, /home/sandbox
-8. xitbox execs bwrap with the agent command
-9. Agent runs. All TCP traffic transparently flows through guardian.
+1. xb reads config (default + .xitbox.yaml merged)
+2. xb starts guardian on 127.0.0.1:PORT with rules from merged config
+3. macOS: write Seatbelt profile → sandbox-exec -f profile command
+   Linux: detect pasta/slirp4netns → set up network namespace → bwrap command
+4. Sandbox runs. All traffic flows through guardian.
+5. On exit: guardian stopped, state dir removed.
 ```
 
-### 5.2 Blocked Connection Attempt
+### Blocked connection
 
 ```
-1. Agent tries: curl https://api.openai.com/v1/chat/completions
-2. TCP SYN leaves sandbox network namespace
-3. iptables REDIRECTs to xit-guardian
-4. guardian sees destination: api.openai.com:443
-5. guardian checks blocklist: MATCH (api.openai.com)
-6. guardian logs JSONL:
-     {"ts":"...","sandbox":"foo","dest":"api.openai.com:443",
-      "action":"deny","reason":"llm-blocklist"}
-7. guardian drops connection (TCP RST or close)
-8. curl gets connection refused / timeout
+1. Process tries to connect to api.openai.com:443
+2. OS enforcement intercepts (Seatbelt / iptables DNAT / relay)
+3. guardian receives connection request
+4. guardian checks: api.openai.com matches deny list → DENY
+5. For CONNECT requests: guardian sends 403 Forbidden
+6. guardian writes JSONL: {"ts":"...","dest":"api.openai.com:443","action":"deny","reason":"blocklist"}
+7. Process gets connection refused / 403
 ```
 
-### 5.3 Dynamic Allow-List Update
+### Live allow rule update
 
 ```
-1. User runs: xitbox allow --domain api.some-registry.io
-2. xitbox CLI connects to guardian's Unix socket:
-     /tmp/xitbox-<name>/guardian.sock
-3. xitbox sends: ADD_RULE { "type": "domain", "value": "api.some-registry.io" }
-4. guardian adds to in-memory whitelist
-5. Future connections to api.some-registry.io are allowed
-6. xitbox updates ~/.config/xitbox/default.yaml for persistence
+1. xb --allow --domain api.mycompany.internal
+2. xb connects to ~/.xb/sandboxes/<name>/guardian.sock
+3. xb sends: {"action":"add_allow","value":"api.mycompany.internal"}
+4. guardian adds to in-memory allowlist
+5. xb writes the rule to the default config file for persistence
 ```
 
 ---
 
 ## 6. Security Model
 
-### Threat Model
+### Threat model (in scope)
 
-**In scope (accidental misuse / casual attacker):**
-- Agent accidentally reads/writes files outside the project
-- Agent accidentally exfiltrates data to a public LLM API
-- Agent installs a malicious package that tries to phone home
-- Agent scans for secrets on the host filesystem
+- Agent reads files outside the project directory
+- Agent exfiltrates data to a public LLM API
+- Agent installs a malicious package that phones home
+- Sandboxed process modifies `.xitbox.yaml` to broaden future sessions
 
-**Out of scope (determined attacker / kernel exploit):**
-- Kernel privilege escalation
-- Sandbox escape via unpatched CVE
-- Spectre/Meltdown-style side channels
-- Physical access attacks
+### Threat model (out of scope)
 
-### Defense Layers
+- Kernel privilege escalation or CVE-based sandbox escape
+- Side-channel attacks
+- Malicious `.xitbox.yaml` committed to the repo (supply chain — visible in code review, not preventable technically)
 
-| Layer | Linux | macOS | What it blocks |
-|-------|-------|-------|---------------|
-| **Mount namespace** | bwrap | bwrap (in VM) | Host filesystem access outside allowed mounts |
-| **Network namespace** | unshare --net | unshare --net (in VM) | Direct host network access |
-| **Transparent proxy** | iptables REDIRECT | iptables REDIRECT (in VM) | Unwhitelisted destinations |
-| **Blocklist** | Guardian memory | Guardian memory (in VM) | Known LLM provider domains |
-| **cgroups** | cgroup v2 | VM resource limits | Resource exhaustion |
-| **Minimal dev** | bwrap --dev-bind | bwrap --dev-bind (in VM) | Device access |
-| **VM boundary** | N/A | Apple Virtualization.framework | Kernel escapes from VM |
+### Defense layers
 
-### Why This Is Enough
-
-For coding agents, the primary risks are:
-1. **Overt exfiltration** — blocked by network whitelist + LLM blocklist
-2. **Accidental damage** — blocked by filesystem isolation
-3. **Dependency confusion** — mitigated by audit logging (you see what domains the agent hits)
-
-A determined attacker with a kernel exploit can escape any process-level sandbox. For that threat model, use a hardware VM per sandbox (like agentcage's VM mode). xitbox trades perfect isolation for speed and simplicity.
+| Layer | Linux | macOS |
+|-------|-------|-------|
+| Filesystem isolation | bwrap bind mounts | Seatbelt `(deny file-write*)` |
+| Network isolation | network namespace | Seatbelt `(deny network-outbound)` |
+| Traffic filtering | iptables DNAT → guardian | Seatbelt → guardian |
+| LLM blocklist | guardian deny list | guardian deny list |
+| Project config protection | `.xitbox.yaml` ro bind | `.xitbox.yaml` ro bind |
 
 ---
 
-## 7. Multi-Sandbox Support & Session Chrome
+## 7. Multi-Sandbox Support
 
-Each sandbox is an independent ephemeral instance with:
-- **Unique network namespace** (Linux) or unique bwrap invocation inside shared VM (macOS)
-- **Unique guardian process** (different port + Unix socket)
-- **Unique iptables chain** (Linux) to avoid rule collisions
-- **Shared Lima VM** (macOS) — one VM, many sandboxes
-- **Session chrome** — a terminal overlay running alongside the agent
+Multiple sandboxes can run simultaneously. Each gets:
+- Its own guardian instance (different port + Unix sockets)
+- Its own network namespace (Linux) or sandbox-exec process (macOS)
+- Its own state directory (`~/.xb/sandboxes/<name>/`)
 
-### Session Chrome
-
-The chrome is a lightweight terminal UI (using a Go TUI library like `charmbracelet/bubbletea` or a simple ANSI-based overlay) that:
-- Displays the last N blocked connection attempts
-- Listens for keystrokes (`a` = allow, `i` = ignore, `l` = view log, `q` = quit chrome but keep sandbox)
-- Sends allow commands to the guardian's Unix socket API
-- Updates the persistent config so the allowance survives future sessions
-
-The chrome runs in the **same terminal** as the agent, using a split-pane or overlay approach. It does not require a separate terminal window.
-
-**Why this matters:** Without the chrome, the user must:
-1. Notice the agent is stuck/broken
-2. Guess which domain was blocked
-3. Open a new terminal
-4. Run `xitbox logs` to find the block
-5. Run `xitbox allow --domain ...`
-6. Restart the agent
-
-With the chrome, it's: press `a`. Done.
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                         Linux Host                           │
-│                                                              │
-│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐        │
-│  │ Sandbox A   │   │ Sandbox B   │   │ Sandbox C   │        │
-│  │ (netns A)   │   │ (netns B)   │   │ (netns C)   │        │
-│  │ guardian:5001│  │ guardian:5002│  │ guardian:5003│       │
-│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘        │
-│         │                 │                 │                │
-│         └─────────────────┴─────────────────┘                │
-│                           │                                  │
-│                    ┌──────┴──────┐                            │
-│                    │  Host Net   │                            │
-│                    │  (internet) │                            │
-│                    └─────────────┘                            │
-└──────────────────────────────────────────────────────────────┘
-```
-
-On macOS, the same diagram applies but inside the Lima VM.
+There is no shared state between running sandboxes. Cleanup is automatic on exit.
 
 ---
 
-## 8. Inter-Sandbox Communication (Future)
-
-For V2, sandboxes can communicate via:
-- **Shared Unix socket directory** — a `volumes` path mounted into all sandboxes that opt-in
-- **Host-local TCP** — a special `host.internal` domain resolves to the host gateway
-- **Message bus** — lightweight ZeroMQ or Unix socket broker inside the Lima VM
-
-This is intentionally not designed yet. The V1 architecture leaves hooks (Unix socket directories, configurable bridge networks) but doesn't implement them.
-
----
-
-## 9. Platform Comparison
+## 8. Platform Comparison
 
 | Concern | Linux | macOS |
 |---------|-------|-------|
-| **Startup time** | ~1s (bwrap + unshare) | ~3s (warm Lima VM + bwrap) |
-| **Memory overhead** | ~10MB | ~512MB (Lima VM) + ~10MB per sandbox |
-| **Disk overhead** | Minimal | ~2GB (Alpine VM image) |
-| **Root required** | No (user namespaces) | No (Lima runs as user) |
-| **Network isolation** | Native netns | VM netns |
-| **Filesystem isolation** | bwrap | bwrap (in VM) |
-| **cgroups** | v2 | Via VM limits |
-| **Kernel** | Host kernel | Separate VM kernel |
-
-The macOS backend trades some memory overhead for hardware isolation and identical behavior to Linux.
+| **Startup time** | <1s | <1s |
+| **Root required** | No | No |
+| **Filesystem isolation** | bwrap | Seatbelt |
+| **Network enforcement** | Network namespace (pasta/slirp/relay) | Seatbelt |
+| **Transparent proxy** | iptables DNAT (with pasta/slirp4netns) | Seatbelt enforces gateway |
+| **External deps** | bwrap + pasta (recommended) | None |
 
 ---
 
-## 10. Dependencies
+## 9. Dependencies
 
 ### Build
-- Go 1.23+
-
-### Runtime — Linux
-- `bubblewrap` (bwrap)
-- `iptables` (or `nftables`)
-- `unshare` (util-linux)
-- `socat` (optional, for Unix socket bridging)
-- cgroup v2 mounted
+- Go 1.23+ (`CGO_ENABLED=0` for static xb binary)
 
 ### Runtime — macOS
-- `lima` (`brew install lima`)
-- Apple Silicon or Intel Mac (Virtualization.framework)
+- Nothing. `sandbox-exec` is built into macOS.
 
-### Optional
-- `fswatch` (for file watching passthrough, future)
+### Runtime — Linux
+- `bubblewrap` (required): `sudo apt install bubblewrap`
+- `pasta` (recommended): `sudo apt install passt`
+- `slirp4netns` (alternative): `sudo apt install slirp4netns`
+- Without pasta/slirp4netns: relay mode (no iptables enforcement)
 
 ---
 
-## 11. Key Files
+## 10. Key Files
 
 ```
-xitbox/
+xb/
 ├── cmd/
-│   ├── xitbox/          # Main CLI entrypoint
-│   └── xit-guardian/    # Proxy daemon
+│   ├── xb/
+│   │   ├── main.go          # Entry point + internal relay mode
+│   │   └── cmd/
+│   │       ├── root.go      # Flag dispatch (allow/logs/list vs sandbox)
+│   │       ├── sandbox.go   # runSandbox()
+│   │       ├── allow.go     # --allow implementation
+│   │       ├── logs.go      # --logs implementation
+│   │       └── list.go      # --list implementation
+│   └── xit-guardian/
+│       └── main.go          # Standalone guardian daemon
 ├── pkg/
-│   ├── backend/
-│   │   ├── linux/       # Linux-specific sandbox setup
-│   │   └── darwin/      # macOS Lima VM management
-│   ├── config/          # YAML config parsing and merging
-│   ├── guardian/        # Proxy engine, whitelist, logging
-│   ├── sandbox/         # Sandbox lifecycle (start, list)
-│   └── fs/              # Mount preparation, persistence mapping
-├── init/
-│   └── lima/            # Lima VM template YAML
+│   ├── config/config.go     # Config types, defaults, YAML loader
+│   ├── guardian/
+│   │   ├── proxy.go         # TCP proxy, SNI extraction, upstream proxy dial
+│   │   ├── rules.go         # Allowlist/blocklist engine
+│   │   └── control.go       # Unix socket control API
+│   ├── sandbox/
+│   │   ├── sandbox.go       # Start(), Darwin backend (Seatbelt)
+│   │   ├── sandbox_linux.go # Linux backend (pasta/slirp/relay)
+│   │   └── sandbox_notlinux.go  # Stub for macOS builds
+│   ├── fs/mounts.go         # bwrap mount preparation
+│   └── platform/platform.go # OS detection, dep checking
 └── docs/
-    ├── PRODUCT.md
-    ├── ARCHITECTURE.md
-    └── IMPLEMENTATION_PLAN.md
+    ├── ARCHITECTURE.md  (this file)
+    ├── NETWORKING.md    # Guardian protocol detail
+    ├── PRODUCT.md       # Product strategy
+    └── CONFIG.md        # Config model design notes
 ```

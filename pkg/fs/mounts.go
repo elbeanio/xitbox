@@ -26,6 +26,18 @@ func PrepareMounts(cfg *config.Config, cwd string) []MountSpec {
 		Mode:   cfg.Filesystem.CWD,
 	})
 
+	// Re-mount .xitbox.yaml read-only even though the rest of cwd is rw.
+	// The sandboxed process can read it (useful) but cannot modify it to
+	// broaden allow rules for future sandbox runs.
+	projectCfg := filepath.Join(cwd, ".xitbox.yaml")
+	if _, err := os.Stat(projectCfg); err == nil {
+		mounts = append(mounts, MountSpec{
+			Source: projectCfg,
+			Dest:   "/workspace/.xitbox.yaml",
+			Mode:   "ro",
+		})
+	}
+
 	// Agent persistence directories
 	for agent, persistDir := range cfg.Filesystem.AgentPersistence {
 		if _, err := os.Stat(persistDir); os.IsNotExist(err) {
@@ -161,5 +173,5 @@ func expandPath(p string) string {
 // SandboxDir returns the per-sandbox working directory.
 func SandboxDir(name string) string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".xitbox", "sandboxes", name)
+	return filepath.Join(home, ".xb", "sandboxes", name)
 }

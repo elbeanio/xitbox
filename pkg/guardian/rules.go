@@ -47,6 +47,20 @@ func (r *Rules) AddDeny(value string) {
 	r.addRule(&r.denyList, value)
 }
 
+// Replace atomically replaces all rules. Used for live config reload.
+func (r *Rules) Replace(allow, deny []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.allowList = nil
+	r.denyList = nil
+	for _, v := range allow {
+		r.addRule(&r.allowList, v)
+	}
+	for _, v := range deny {
+		r.addRule(&r.denyList, v)
+	}
+}
+
 func (r *Rules) addRule(list *[]Rule, value string) {
 	value = strings.TrimSpace(value)
 	if value == "" {

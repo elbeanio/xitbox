@@ -42,6 +42,15 @@ func DefaultConfig() *Config {
 				"140.82.0.0/16",
 			},
 			LogFile: defaultLogPath(),
+			// Default env vars injected when ca_bundle is set.
+			// Add your own toolchain vars here or in the config file.
+			CABundleEnvVars: []string{
+				"NODE_EXTRA_CA_CERTS", // Node.js
+				"REQUESTS_CA_BUNDLE",  // Python requests / httpx
+				"SSL_CERT_FILE",       // curl, OpenSSL-linked tools
+				"CURL_CA_BUNDLE",      // curl (explicit)
+				"GIT_SSL_CAINFO",      // git
+			},
 		},
 		Filesystem: FilesystemConfig{
 			CWD: "rw",
@@ -84,6 +93,20 @@ type NetworkConfig struct {
 	DenyList      []string `yaml:"deny_list"`
 	Allow         []string `yaml:"allow"`
 	LogFile       string   `yaml:"log_file"`
+
+	// UpstreamProxy forwards allowed traffic through a corporate proxy.
+	// Supports http:// and https:// with optional basic auth:
+	//   http://proxy.corp.internal:8080
+	//   http://user:pass@proxy.corp.internal:8080
+	UpstreamProxy string `yaml:"upstream_proxy,omitempty"`
+
+	// CABundle is the path to a PEM certificate bundle to inject into the
+	// sandbox environment. Used when a corporate proxy performs TLS inspection.
+	CABundle string `yaml:"ca_bundle,omitempty"`
+
+	// CABundleEnvVars lists the env vars to set to the CABundle path.
+	// Defaults to the common set; extend this list for custom toolchains.
+	CABundleEnvVars []string `yaml:"ca_bundle_env_vars,omitempty"`
 }
 
 // FilesystemConfig controls filesystem access.
@@ -193,5 +216,5 @@ func defaultLogPath() string {
 // defaultPersistPath returns the default persistence directory for an agent.
 func defaultPersistPath(agent string) string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".xitbox", "persist", agent)
+	return filepath.Join(home, ".xb", "persist", agent)
 }

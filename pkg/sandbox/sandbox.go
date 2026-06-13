@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,15 +25,10 @@ type Runtime struct {
 	StateDir string
 }
 
-// knownAgents maps common agent command names to their config directories.
+// knownAgents maps command names to their config directories under $HOME.
 //
-// opencode is intentionally NOT listed. Its TUI (built on opentui) silently
-// exits with code 255 over SSH/VM transports, including inside the Lima
-// VM we provision — same symptom as opencode issues #6119 and #24475. The
-// same problems have been reported on Gnome Terminal and other non-kitty
-// hosts upstream, so the root cause is in the library, not in our setup.
-// The author has decided not to chase it. Use `opencode web` outside xitbox
-// or pick one of the other supported agents below.
+// opencode is intentionally NOT listed — its TUI silently exits with code 255
+// over SSH/VM transports (opencode issues #6119, #24475). Use `opencode web`.
 var knownAgents = map[string]string{
 	"claude": ".claude",
 	"aider":  ".aider",
@@ -43,7 +37,7 @@ var knownAgents = map[string]string{
 	"gemini": ".gemini",
 }
 
-// Start creates and runs a sandbox.
+// Start creates and runs an ephemeral sandbox, blocking until the command exits.
 func Start(name string, cfg *config.Config, info *platform.Info, command []string) (*Runtime, error) {
 	if name == "" {
 		name = fmt.Sprintf("sandbox-%d", time.Now().Unix())
@@ -61,20 +55,11 @@ func Start(name string, cfg *config.Config, info *platform.Info, command []strin
 		StateDir: stateDir,
 	}
 
-	// Start guardian proxy
 	guardianPort := strconv.Itoa(50000 + os.Getpid()%10000)
 	controlSock := filepath.Join(stateDir, "guardian.sock")
-	logPath := cfg.Network.LogFile
-
-	// On macOS, guardian must listen on all interfaces so the Lima VM can reach it
-	guardianHost := "127.0.0.1"
-	if info.IsDarwin() {
-		guardianHost = "0.0.0.0"
-	}
-	guardianAddr := guardianHost + ":" + guardianPort
 
 	rules := guardian.NewRules(cfg.Network.Allow, cfg.Network.DenyList)
-	server, err := guardian.NewServer(guardianAddr, controlSock, logPath, rules)
+	server, err := guardian.NewServer("127.0.0.1:"+guardianPort, controlSock, cfg.Network.LogFile, cfg.Network.UpstreamProxy, rules)
 	if err != nil {
 		return nil, fmt.Errorf("create guardian: %w", err)
 	}
@@ -83,452 +68,242 @@ func Start(name string, cfg *config.Config, info *platform.Info, command []strin
 	}
 	rt.Guardian = server
 
-	// On macOS, delegate to Lima VM backend
+	pidFile := filepath.Join(stateDir, "pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
+		return nil, fmt.Errorf("write pid file: %w", err)
+	}
+
+	// Watch config files for changes and hot-reload guardian rules.
+	cwd, _ := os.Getwd()
+	watchStop := make(chan struct{})
+	go watchConfig(server, cwd, watchStop)
+
+	var runErr error
 	if info.IsDarwin() {
-		// Write PID file for listing
-		pidFile := filepath.Join(stateDir, "pid")
-		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
-			return nil, fmt.Errorf("write pid file: %w", err)
-		}
-
-		if err := runDarwin(rt, cfg, info, command, guardianPort); err != nil {
-			rt.Cleanup()
-			return rt, err
-		}
-		rt.Cleanup()
-		return rt, nil
+		runErr = runDarwin(rt, cfg, command, guardianPort)
+	} else {
+		runErr = runLinux(rt, cfg, command, guardianPort)
 	}
 
-	// Linux: run bwrap directly
-	if err := runLinux(rt, cfg, info, command, guardianPort); err != nil {
-		rt.Cleanup()
-		return rt, err
-	}
+	close(watchStop)
 	rt.Cleanup()
-	return rt, nil
+	return rt, runErr
 }
 
-func runLinux(rt *Runtime, cfg *config.Config, info *platform.Info, command []string, guardianPort string) error {
-	// Build bwrap args
+// watchConfig polls the default config and project config for mtime changes.
+// When either file changes it reloads and hot-swaps guardian's rules.
+func watchConfig(server *guardian.Server, cwd string, stop <-chan struct{}) {
+	paths := []string{config.DefaultConfigPath()}
+	if cwd != "" {
+		paths = append(paths, filepath.Join(cwd, ".xitbox.yaml"))
+	}
+
+	mtimes := make(map[string]time.Time)
+	for _, p := range paths {
+		if info, err := os.Stat(p); err == nil {
+			mtimes[p] = info.ModTime()
+		}
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			changed := false
+			for _, p := range paths {
+				info, err := os.Stat(p)
+				if err != nil {
+					continue
+				}
+				if !info.ModTime().Equal(mtimes[p]) {
+					mtimes[p] = info.ModTime()
+					changed = true
+				}
+			}
+			if !changed {
+				continue
+			}
+			newCfg, err := config.Load(cwd, nil)
+			if err == nil {
+				server.ReplaceRules(newCfg.Network.Allow, newCfg.Network.DenyList)
+			}
+		}
+	}
+}
+
+// runLinux is implemented in sandbox_linux.go (Linux) and sandbox_notlinux.go (others).
+
+// runDarwin runs the command on macOS using sandbox-exec (Seatbelt) for
+// filesystem isolation and the guardian proxy for network filtering.
+func runDarwin(rt *Runtime, cfg *config.Config, command []string, guardianPort string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get cwd: %w", err)
 	}
-	mounts := fs.PrepareMounts(cfg, cwd)
-	var envWhitelist []string
-	if cfg.Env.Filter {
-		envWhitelist = cfg.Env.Allow
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
 	}
-	bwrapArgs := fs.BuildBwrapArgs(mounts, envWhitelist)
 
-	// Check bwrap is available
-	bwrapPath, err := exec.LookPath("bwrap")
+	// Determine which agent config dir (if any) needs write access.
+	agentConfigDir := ""
+	if len(command) > 0 {
+		if dotDir, ok := knownAgents[command[0]]; ok {
+			home, _ := os.UserHomeDir()
+			agentConfigDir = filepath.Join(home, dotDir)
+		}
+	}
+
+	// Write a Seatbelt profile to a temp file.
+	profile, err := buildSeatbeltProfile(cwd, agentConfigDir, guardianPort)
 	if err != nil {
-		return fmt.Errorf("bubblewrap (bwrap) not found; install it or run 'xitbox init' to check dependencies")
+		return fmt.Errorf("build seatbelt profile: %w", err)
 	}
+	profileFile, err := os.CreateTemp("", "xb-sandbox-*.sb")
+	if err != nil {
+		return fmt.Errorf("create seatbelt profile: %w", err)
+	}
+	defer os.Remove(profileFile.Name())
+	if _, err := profileFile.WriteString(profile); err != nil {
+		return fmt.Errorf("write seatbelt profile: %w", err)
+	}
+	profileFile.Close()
 
-	// Build command
-	args := append([]string{}, bwrapArgs...)
-	args = append(args, command...)
-
-	cmd := exec.Command(bwrapPath, args...)
+	// sandbox-exec -f <profile> <command...>
+	args := append([]string{"-f", profileFile.Name()}, command...)
+	cmd := exec.Command("sandbox-exec", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = sandboxEnv(cfg, guardianPort)
 	rt.Cmd = cmd
 
-	// Set up proxy environment for the sandboxed process
-	cmd.Env = append(os.Environ(),
+	savedTTY := saveTTY()
+	defer restoreTTY(savedTTY)
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("sandboxed command: %w", err)
+	}
+	return nil
+}
+
+// buildSeatbeltProfile returns a Seatbelt sandbox profile that:
+//   - Allows all reads (tools need their host deps)
+//   - Denies writes outside cwd, agentConfigDir, and /tmp
+//   - Denies all outbound network except to guardian on 127.0.0.1:guardianPort
+func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string) (string, error) {
+	var b strings.Builder
+	b.WriteString("(version 1)\n")
+	b.WriteString("(allow default)\n")
+
+	// Filesystem: deny writes outside allowed paths.
+	b.WriteString("(deny file-write*)\n")
+	fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbPath(cwd))
+	b.WriteString("(allow file-write* (subpath \"/tmp\"))\n")
+	b.WriteString("(allow file-write* (subpath \"/private/tmp\"))\n")
+	// macOS uses /private/var/folders/<xx>/<...>/T/ for per-process temp files.
+	b.WriteString("(allow file-write* (regex #\"^/private/var/folders/\"))\n")
+	if agentConfigDir != "" {
+		fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbPath(agentConfigDir))
+	}
+
+	// Network: deny all outbound, allow only the guardian proxy.
+	// This ensures processes that ignore HTTP_PROXY still can't reach the
+	// internet directly — all TCP must go through guardian.
+	b.WriteString("(deny network-outbound)\n")
+	fmt.Fprintf(&b, "(allow network-outbound (remote tcp4 \"localhost:%s\"))\n", guardianPort)
+	// Unix domain sockets are used for macOS system IPC including the DNS
+	// resolver (mDNSResponder), so allow them unconditionally.
+	b.WriteString("(allow network-outbound (remote unix-socket))\n")
+
+	return b.String(), nil
+}
+
+// sbPath returns a Seatbelt-quoted path literal.
+func sbPath(p string) string {
+	return `"` + strings.ReplaceAll(p, `"`, `\"`) + `"`
+}
+
+// sandboxEnv builds the environment for the sandboxed process.
+func sandboxEnv(cfg *config.Config, guardianPort string) []string {
+	base := os.Environ()
+	if cfg.Env.Filter {
+		base = filteredEnv(cfg.Env.Allow)
+	}
+	env := append(base,
 		"HTTP_PROXY=http://127.0.0.1:"+guardianPort,
 		"HTTPS_PROXY=http://127.0.0.1:"+guardianPort,
+		"NO_PROXY=localhost,127.0.0.1",
 	)
-
-	// Write PID file for listing
-	pidFile := filepath.Join(rt.StateDir, "pid")
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
-		return fmt.Errorf("write pid file: %w", err)
-	}
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("sandboxed command: %w", err)
-	}
-	return nil
-}
-
-func runDarwin(rt *Runtime, cfg *config.Config, info *platform.Info, command []string, guardianPort string) error {
-	// On macOS, each agent gets its own Lima VM for strong isolation.
-	// The VM mounts ONLY the project dir and that agent's persist dir.
-	vmName := vmNameForCommand(command)
-	agentName := agentNameForCommand(command)
-
-	// Ensure VM exists and is running
-	if err := ensureLimaVM(vmName, agentName); err != nil {
-		return err
-	}
-
-	// Build env for the VM:
-	// - PATH: prepend $HOME/.local/bin so uv-installed tools (aider) are found
-	// - TERM/COLORTERM/TERM_PROGRAM: pass through from the host so TUIs can
-	//   detect terminal capabilities. Many TUI libs wait for capability-query
-	//   responses and silently time out if the VM has no TERM set.
-	// - HTTP_PROXY/HTTPS_PROXY: route traffic through the host guardian
-	hostTerm := os.Getenv("TERM")
-	if hostTerm == "" {
-		hostTerm = "xterm-256color"
-	}
-	proxyEnv := fmt.Sprintf(
-		"PATH=$HOME/.local/bin:$PATH TERM=%s COLORTERM=%s TERM_PROGRAM=%s HTTP_PROXY=http://host.lima.internal:%s HTTPS_PROXY=http://host.lima.internal:%s NO_PROXY=localhost,127.0.0.1",
-		hostTerm,
-		envOr("COLORTERM", "truecolor"),
-		envOr("TERM_PROGRAM", "xitbox"),
-		guardianPort, guardianPort,
-	)
-
-	// Build the command: run inside VM with proxy env and cd to project dir
-	cwd, _ := os.Getwd()
-	vmArgs := []string{"shell", vmName, "--"}
-	vmArgs = append(vmArgs, "sh", "-c", "cd "+shQuote(cwd)+" && "+proxyEnv+" exec "+strings.Join(command, " "))
-
-	cmd := exec.Command("limactl", vmArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-	rt.Cmd = cmd
-
-	// Reset the host terminal after the child exits. TUI apps that crash
-	// (claude TUI, aider, gemini) often leave the terminal in raw/alt-screen
-	// mode. See resetTerminal for the full list of modes we clean up.
-	defer resetTerminal()
-
-	if err := cmd.Run(); err != nil {
-		// Provide helpful message for common agents not installed in VM
-		if len(command) > 0 {
-			agent := command[0]
-			probe := exec.Command("limactl", "shell", vmName, "--", "sh", "-c", "command -v "+agent)
-			probe.Stderr = &bytes.Buffer{}
-			if check, _ := probe.Output(); len(check) == 0 {
-				fmt.Fprintf(os.Stderr, "\n⚠️  %s is not installed in the %s VM.\n", agent, vmName)
-				fmt.Fprintf(os.Stderr, "Install it with:\n")
-				switch agent {
-				case "claude":
-					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g @anthropic-ai/claude-code\n", vmName)
-				case "codex":
-					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g @openai/codex\n", vmName)
-				case "gemini":
-					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo npm install -g @google/gemini-cli\n", vmName)
-				case "aider":
-					fmt.Fprintf(os.Stderr, "  limactl shell %s -- sudo apt-get install -y curl build-essential python3-dev pipx python3 git && pipx install uv && uv python install 3.12 && uv tool install --python 3.12 aider-chat\n", vmName)
-				default:
-					fmt.Fprintf(os.Stderr, "  limactl shell %s -- <install-command>\n", vmName)
-				}
-			}
+	if ca := expandTildePath(cfg.Network.CABundle); ca != "" {
+		for _, varName := range cfg.Network.CABundleEnvVars {
+			env = append(env, varName+"="+ca)
 		}
-		return fmt.Errorf("sandboxed command: %w", err)
 	}
-	return nil
+	return env
 }
 
-// resetTerminal puts the controlling terminal back into a sane state.
-//
-// TUI apps (claude, aider, gemini, vim, etc.) toggle a bunch of terminal
-// modes on entry that they normally toggle off on exit. If they crash or
-// get killed mid-run, those modes stay on, leaving the terminal in a
-// weird state. `stty sane` only fixes tty settings (raw mode, echo) —
-// it does NOT undo the terminal-emulator mode switches. We have to send
-// the matching close sequences ourselves:
-//
-//	ESC[?1049l  leave alternate screen buffer
-//	ESC[?25h    show cursor
-//	ESC[?1000l  disable X11 mouse click tracking
-//	ESC[?1002l  disable X11 mouse drag tracking
-//	ESC[?1003l  disable X11 mouse-motion tracking (every move = garbage chars)
-//	ESC[?1006l  disable SGR extended mouse mode
-//	ESC[?1004l  disable focus in/out events
-//	ESC[!p      DECSTR soft reset (catches anything we missed)
-//
-// Combined with `stty sane` this restores a healthy terminal after any
-// kind of agent exit.
-func resetTerminal() {
-	const resetSeq = "\x1b[!p" +
-		"\x1b[?1049l" +
-		"\x1b[?25h" +
+// filteredEnv returns only the env vars in the allowlist.
+func filteredEnv(allow []string) []string {
+	allowed := make(map[string]bool, len(allow))
+	for _, k := range allow {
+		allowed[k] = true
+	}
+	var out []string
+	for _, kv := range os.Environ() {
+		key := kv
+		if idx := strings.IndexByte(kv, '='); idx >= 0 {
+			key = kv[:idx]
+		}
+		if allowed[key] {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func expandTildePath(p string) string {
+	if len(p) > 0 && p[0] == '~' {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[1:])
+		}
+	}
+	return p
+}
+
+// saveTTY captures tty settings so they can be restored after the child exits.
+// Returns empty string if stdin is not a tty.
+func saveTTY() string {
+	out, err := exec.Command("stty", "-g").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// restoreTTY restores tty settings and resets cursor/mouse escape modes.
+// The alternate-screen escape (1049l) is intentionally omitted — sending it
+// when the terminal is not in alt-screen mode can wipe visible output.
+func restoreTTY(saved string) {
+	if saved == "" {
+		return
+	}
+	const modeReset = "\x1b[?25h" +
 		"\x1b[?1000l" +
 		"\x1b[?1002l" +
 		"\x1b[?1003l" +
 		"\x1b[?1006l" +
 		"\x1b[?1004l"
-	_, _ = os.Stderr.WriteString(resetSeq)
-	stty := exec.Command("stty", "sane")
+	_, _ = os.Stderr.WriteString(modeReset)
+	stty := exec.Command("stty", saved)
 	stty.Stdin = os.Stdin
 	_ = stty.Run()
 }
 
-// vmNameForCommand returns the Lima VM name for a given command.
-// Known agents get their own VM; everything else shares "xitbox-default".
-func vmNameForCommand(command []string) string {
-	if len(command) == 0 {
-		return "xitbox-default"
-	}
-	name := command[0]
-	if _, ok := knownAgents[name]; ok {
-		return "xitbox-" + name
-	}
-	return "xitbox-default"
-}
-
-// agentNameForCommand returns the agent name if the command is a known agent.
-func agentNameForCommand(command []string) string {
-	if len(command) == 0 {
-		return ""
-	}
-	name := command[0]
-	if _, ok := knownAgents[name]; ok {
-		return name
-	}
-	return ""
-}
-
-// Lima VM management
-func ensureLimaVM(vmName, agentName string) error {
-	// Check if VM exists
-	exists, err := limaVMExists(vmName)
-	if err != nil {
-		return fmt.Errorf("check vm: %w", err)
-	}
-
-	if !exists {
-		fmt.Fprintf(os.Stderr, "🔄  Creating %s Lima VM (this takes ~30-60s)...\n", vmName)
-		if err := createLimaVM(vmName, agentName); err != nil {
-			return fmt.Errorf("create vm: %w", err)
-		}
-		// Install system packages the agent needs (nodejs, python, etc.)
-		if agentName != "" {
-			if err := bootstrapAgentVM(vmName, agentName); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️  Could not bootstrap agent packages: %v\n", err)
-				fmt.Fprintf(os.Stderr, "    You may need to install them manually:\n")
-				fmt.Fprintf(os.Stderr, "      limactl shell %s -- sudo apk add <packages>\n", vmName)
-			}
-			// Install the agent itself (npm/uv). Skipped if already present.
-			if err := installAgent(vmName, agentName); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️  Could not install %s: %v\n", agentName, err)
-				fmt.Fprintf(os.Stderr, "    The agent CLI is not available inside the VM.\n")
-			}
-		}
-		// Create symlinks for agent persist dirs inside the VM
-		if agentName != "" {
-			if err := setupAgentSymlinks(vmName, agentName); err != nil {
-				fmt.Fprintf(os.Stderr, "⚠️  Could not set up agent symlinks: %v\n", err)
-			}
-		}
-	}
-
-	// Check if running
-	running, err := limaVMRunning(vmName)
-	if err != nil {
-		return fmt.Errorf("check vm status: %w", err)
-	}
-
-	if !running {
-		fmt.Fprintf(os.Stderr, "🔄  Starting %s Lima VM...\n", vmName)
-		if err := startLimaVM(vmName); err != nil {
-			return fmt.Errorf("start vm: %w", err)
-		}
-		// Wait for VM to be ready
-		for i := 0; i < 30; i++ {
-			time.Sleep(1 * time.Second)
-			running, _ = limaVMRunning(vmName)
-			if running {
-				break
-			}
-		}
-		if !running {
-			return fmt.Errorf("vm failed to start")
-		}
-	}
-
-	return nil
-}
-
-func limaVMExists(vmName string) (bool, error) {
-	out, err := exec.Command("limactl", "list", "--json").Output()
-	if err != nil {
-		return false, err
-	}
-	return contains(string(out), fmt.Sprintf(`"name":"%s"`, vmName)), nil
-}
-
-func limaVMRunning(vmName string) (bool, error) {
-	out, err := exec.Command("limactl", "list", vmName, "--json").Output()
-	if err != nil {
-		return false, nil
-	}
-	return contains(string(out), `"status":"Running"`), nil
-}
-
-func createLimaVM(vmName, agentName string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get cwd: %w", err)
-	}
-
-	// Build mount flags — only project dir + agent persist dir
-	// Lima mounts host paths to the same path inside the VM by default.
-	// We cd to the project path and create symlinks for agent configs.
-	args := []string{
-		"start",
-		"--name=" + vmName,
-		"--tty=false",
-		"--cpus=2",
-		"--memory=0.5",
-		"--containerd=none",
-	}
-
-	// Use --mount-only for project dir (removes default home mount)
-	mounts := []string{cwd + ":w"}
-
-	// Add agent persist dir mount if this is a known agent. We always
-	// mkdir the dir first so it exists inside the VM too — otherwise we'd
-	// either skip the mount (no persistence) or create a broken symlink
-	// later (ENOENT when the agent tries to write to ~/.<agent>).
-	if agentName != "" {
-		home, _ := os.UserHomeDir()
-		persistDir := filepath.Join(home, ".xitbox", "persist", agentName)
-		if err := os.MkdirAll(persistDir, 0755); err != nil {
-			return fmt.Errorf("create persist dir %s: %w", persistDir, err)
-		}
-		mounts = append(mounts, persistDir+":w")
-	}
-	args = append(args, "--mount-only", strings.Join(mounts, ","))
-
-	// Debian (glibc) base. Alpine is musl so no prebuilt wheels exist for
-	// aarch64 Python packages with C extensions (tree-sitter for aider, etc.).
-	// Debian is glibc and much lighter than Ubuntu (~400MB vs ~1GB base).
-	args = append(args, "template:debian")
-
-	return limaSilent(args...)
-}
-
-func startLimaVM(vmName string) error {
-	return limaSilent("start", vmName)
-}
-
-func setupAgentSymlinks(vmName, agentName string) error {
-	// Create the persist dir on the host first. If we skip this and the dir
-	// doesn't exist, `ln -sf` produces a broken symlink inside the VM, and
-	// any agent that tries to write to ~/.<agent> at startup (e.g. gemini
-	// creating ~/.gemini for checkpointing) will hit ENOENT.
-	home, _ := os.UserHomeDir()
-	persistDir := filepath.Join(home, ".xitbox", "persist", agentName)
-	if err := os.MkdirAll(persistDir, 0755); err != nil {
-		return fmt.Errorf("create persist dir %s: %w", persistDir, err)
-	}
-	// Now create the symlink inside the VM. The persist dir is mounted at
-	// the same host path inside the VM, so the symlink resolves.
-	symlinkCmd := fmt.Sprintf("ln -sf %s ~/.%s", shQuote(persistDir), agentName)
-	return limaSilent("shell", vmName, "--", "sh", "-c", symlinkCmd)
-}
-
-// bootstrapAgentVM installs the system packages a known agent needs.
-// This is a one-time setup that runs after the VM is first created.
-// npm-based agents (claude, codex, gemini) need nodejs + npm + git.
-// aider uses uv (installed separately) which manages its own Python, but
-// tree-sitter is a C extension so we need a build toolchain on Debian.
-func bootstrapAgentVM(vmName, agentName string) error {
-	var pkgs string
-	switch agentName {
-	case "claude", "codex", "cline", "gemini":
-		pkgs = "nodejs npm git"
-	case "aider":
-		// build-essential + python3-dev: tree-sitter and other C extensions
-		// need a compiler and Python.h. pipx is the cleanest way to get uv
-		// installed in the VM — PyPI works over the default TLS, but the
-		// Debian image has a TLS 1.3 issue with astral.sh / GitHub that
-		// breaks the official uv installer.
-		pkgs = "python3 git curl build-essential python3-dev pipx"
-	default:
-		pkgs = "git curl"
-	}
-	fmt.Fprintf(os.Stderr, "📦  Installing %s system packages in %s...\n", agentName, vmName)
-	cmd := fmt.Sprintf("sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends %s", pkgs)
-	return limaSilent("shell", vmName, "--", "sh", "-c", cmd)
-}
-
-// installAgent installs the agent's binary inside the VM. One-time per VM,
-// runs after bootstrapAgentVM. Skipped if the agent is already installed.
-//
-// claude/codex/gemini install via npm; aider installs via uv (with uv
-// itself bootstrapped from PyPI via pipx).
-func installAgent(vmName, agentName string) error {
-	// Skip if already installed — keeps re-runs cheap and survives VM restarts.
-	probe := exec.Command("limactl", "shell", vmName, "--", "sh", "-c", "command -v "+agentName)
-	probe.Stderr = &bytes.Buffer{}
-	if out, err := probe.Output(); err == nil && len(bytes.TrimSpace(out)) > 0 {
-		return nil
-	}
-
-	var installCmd string
-	switch agentName {
-	case "claude":
-		installCmd = "sudo npm install -g @anthropic-ai/claude-code"
-	case "codex":
-		installCmd = "sudo npm install -g @openai/codex"
-	case "gemini":
-		installCmd = "sudo npm install -g @google/gemini-cli"
-	case "aider":
-		// Get uv via pipx (which is in apt). Pin --python 3.12 because
-		// aider-chat's pinned numpy 1.26.4 has cp312 wheels on aarch64
-		// linux but no cp313 wheels. Install as the user — uv tool
-		// binaries land in ~/.local/bin which the runDarwin shell wrapper
-		// prepends to PATH.
-		installCmd = `sh -c '
-			set -e
-			export TMPDIR=/tmp
-			export PATH="$HOME/.local/bin:$PATH"
-			if ! command -v uv >/dev/null 2>&1; then
-				pipx install uv
-			fi
-			uv python install 3.12 >/dev/null
-			uv tool install --python 3.12 aider-chat
-		'`
-	case "cline":
-		// Cline is a VS Code extension, not a CLI — nothing to install in the VM.
-		return nil
-	default:
-		return nil
-	}
-
-	fmt.Fprintf(os.Stderr, "📥  Installing %s in %s (this can take a minute)...\n", agentName, vmName)
-	return limaSilent("shell", vmName, "--", "sh", "-c", installCmd)
-}
-
-// limaSilent runs a limactl command while hiding its (very verbose) output.
-// If the command fails, the captured output is shown so the user can debug.
-func limaSilent(args ...string) error {
-	cmd := exec.Command("limactl", args...)
-	cmd.Env = os.Environ()
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		out := strings.TrimSpace(buf.String())
-		if out == "" {
-			return fmt.Errorf("limactl %s: %w", strings.Join(args, " "), err)
-		}
-		return fmt.Errorf("limactl %s: %w\n%s", strings.Join(args, " "), err, out)
-	}
-	return nil
-}
-
-// shQuote quotes a string for safe use in a shell command.
-func shQuote(s string) string {
-	if strings.ContainsAny(s, " \t\n\"'\\$") {
-		return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
-	}
-	return s
-}
-
-// envOr returns the value of the host env var, or fallback if unset/empty.
+// envOr returns the env var value or fallback if unset/empty.
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -536,11 +311,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
-}
-
-// Cleanup removes the sandbox state.
+// Cleanup removes the sandbox state directory and stops the guardian.
 func (r *Runtime) Cleanup() {
 	if r.Guardian != nil {
 		r.Guardian.Stop()
@@ -550,13 +321,18 @@ func (r *Runtime) Cleanup() {
 	}
 }
 
-// ListRunning returns all currently running sandboxes.
+// ControlSockPath returns the guardian control socket path for a sandbox.
+func ControlSockPath(name string) string {
+	return filepath.Join(fs.SandboxDir(name), "guardian.sock")
+}
+
+// ListRunning returns all sandboxes that have a live pid file.
 func ListRunning() ([]SandboxInfo, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	sandboxDir := filepath.Join(home, ".xitbox", "sandboxes")
+	sandboxDir := filepath.Join(home, ".xb", "sandboxes")
 	entries, err := os.ReadDir(sandboxDir)
 	if err != nil {
 		if os.IsNotExist(err) {

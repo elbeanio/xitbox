@@ -75,8 +75,8 @@ func detectDeps() []Dependency {
 		deps = append(deps, check("unshare", false, "usually part of util-linux"))
 		deps = append(deps, check("socat", false, "sudo apt install socat"))
 	} else if runtime.GOOS == "darwin" {
-		deps = append(deps, check("lima", true, "brew install lima"))
-		deps = append(deps, check("limactl", true, "brew install lima"))
+		// sandbox-exec is built into macOS — no external deps needed.
+		deps = append(deps, check("sandbox-exec", true, "built into macOS; should always be present"))
 	}
 
 	return deps
@@ -117,24 +117,24 @@ func detectAgents() []string {
 
 func persistDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".xitbox", "persist")
+	return filepath.Join(home, ".xb", "persist")
 }
 
 func sandboxDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".xitbox", "sandboxes")
+	return filepath.Join(home, ".xb", "sandboxes")
 }
 
-// EnsureDirs creates the xitbox directories if they don't exist.
+// EnsureDirs creates the xb directories if they don't exist.
 func EnsureDirs() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
 	}
 	dirs := []string{
-		filepath.Join(home, ".xitbox", "persist"),
-		filepath.Join(home, ".xitbox", "sandboxes"),
-		filepath.Join(home, ".xitbox", "logs"),
+		filepath.Join(home, ".xb", "persist"),
+		filepath.Join(home, ".xb", "sandboxes"),
+		filepath.Join(home, ".xb", "logs"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {

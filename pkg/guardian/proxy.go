@@ -3,12 +3,14 @@ package guardian
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,29 +21,32 @@ import (
 
 // Server is the guardian proxy.
 type Server struct {
-	listenAddr  string
-	controlSock string
-	logPath     string
-	rules       *Rules
-	logFile     *os.File
-	logMu       sync.Mutex
-	listener    net.Listener
-	controlLn   net.Listener
-	wg          sync.WaitGroup
-	stopCh      chan struct{}
+	listenAddr    string
+	controlSock   string
+	logPath       string
+	upstreamProxy string // optional corporate proxy, e.g. http://proxy.corp:8080
+	rules         *Rules
+	logFile       *os.File
+	logMu         sync.Mutex
+	listener      net.Listener
+	controlLn     net.Listener
+	proxySockLn   net.Listener // optional Unix socket proxy listener (Linux relay mode)
+	wg            sync.WaitGroup
+	stopCh        chan struct{}
 }
 
 // NewServer creates a new guardian server.
-func NewServer(listenAddr, controlSock, logPath string, rules *Rules) (*Server, error) {
+func NewServer(listenAddr, controlSock, logPath, upstreamProxy string, rules *Rules) (*Server, error) {
 	if rules == nil {
 		rules = NewRules(nil, nil)
 	}
 	return &Server{
-		listenAddr:  listenAddr,
-		controlSock: controlSock,
-		logPath:     logPath,
-		rules:       rules,
-		stopCh:      make(chan struct{}),
+		listenAddr:    listenAddr,
+		controlSock:   controlSock,
+		logPath:       logPath,
+		upstreamProxy: upstreamProxy,
+		rules:         rules,
+		stopCh:        make(chan struct{}),
 	}, nil
 }
 
@@ -89,6 +94,38 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// AddProxySock opens an additional Unix domain socket for proxy connections.
+// Used by the Linux relay mode to accept connections from inside the sandbox.
+func (s *Server) AddProxySock(path string) error {
+	os.Remove(path)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create proxy sock dir: %w", err)
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return fmt.Errorf("listen proxy sock: %w", err)
+	}
+	s.proxySockLn = ln
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-s.stopCh:
+					return
+				default:
+					continue
+				}
+			}
+			s.wg.Add(1)
+			go s.handleConnection(conn)
+		}
+	}()
+	return nil
+}
+
 // Stop shuts down the server.
 func (s *Server) Stop() error {
 	close(s.stopCh)
@@ -98,11 +135,20 @@ func (s *Server) Stop() error {
 	if s.controlLn != nil {
 		s.controlLn.Close()
 	}
+	if s.proxySockLn != nil {
+		s.proxySockLn.Close()
+	}
 	s.wg.Wait()
 	if s.logFile != nil {
 		s.logFile.Close()
 	}
 	return nil
+}
+
+// ReplaceRules atomically replaces the guardian's allow and deny lists.
+// Used for live config reload without restarting the sandbox.
+func (s *Server) ReplaceRules(allow, deny []string) {
+	s.rules.Replace(allow, deny)
 }
 
 // Addr returns the actual listening address.
@@ -157,15 +203,12 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		}
 		host, portStr, err := net.SplitHostPort(req.Host)
 		if err != nil {
-			// No port, default to 443
 			host = req.Host
 			portStr = "443"
 		}
 		destHost = host
 		destPort = parsePort(portStr)
-
-		// Send 200 OK back to client
-		fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection established\r\n\r\n")
+		// 200 is sent below, after the rules check.
 	} else {
 		// Try TLS SNI extraction
 		sni, ok := extractSNI(peek)
@@ -194,12 +237,19 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	s.logDecision(fmt.Sprintf("%s:%d", destHost, destPort), action, reason, "")
 
 	if action == "deny" {
+		if isConnect {
+			fmt.Fprintf(clientConn, "HTTP/1.1 403 Forbidden\r\n\r\n")
+		}
 		return
 	}
 
-	// Connect to destination
+	if isConnect {
+		fmt.Fprintf(clientConn, "HTTP/1.1 200 Connection established\r\n\r\n")
+	}
+
+	// Connect to destination (directly or via upstream proxy)
 	destAddr := net.JoinHostPort(destHost, strconv.Itoa(destPort))
-	serverConn, err := net.Dial("tcp", destAddr)
+	serverConn, err := s.dialDest(destAddr)
 	if err != nil {
 		log.Printf("connect to %s: %v", destAddr, err)
 		return
@@ -214,17 +264,71 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		}
 	}
 
-	// Bidirectional copy
+	// Bidirectional copy. When either side closes, close the other so the
+	// second goroutine unblocks and we exit cleanly without leaking it.
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(serverConn, clientConn)
+		serverConn.Close()
 		done <- struct{}{}
 	}()
 	go func() {
 		io.Copy(clientConn, serverConn)
+		clientConn.Close()
 		done <- struct{}{}
 	}()
 	<-done
+	<-done
+}
+
+// dialDest connects to destAddr, routing through s.upstreamProxy if configured.
+// For upstream proxies it uses HTTP CONNECT to establish the tunnel.
+func (s *Server) dialDest(destAddr string) (net.Conn, error) {
+	if s.upstreamProxy == "" {
+		return net.Dial("tcp", destAddr)
+	}
+
+	u, err := url.Parse(s.upstreamProxy)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream proxy: %w", err)
+	}
+
+	proxyHost := u.Host
+	conn, err := net.Dial("tcp", proxyHost)
+	if err != nil {
+		return nil, fmt.Errorf("dial upstream proxy %s: %w", proxyHost, err)
+	}
+
+	// Send CONNECT to the upstream proxy
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", destAddr, destAddr)
+	if u.User != nil {
+		creds := u.User.String()
+		encoded := basicAuthHeader(creds)
+		req += "Proxy-Authorization: Basic " + encoded + "\r\n"
+	}
+	req += "\r\n"
+
+	if _, err := fmt.Fprint(conn, req); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("send CONNECT to upstream proxy: %w", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read upstream proxy response: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+		return nil, fmt.Errorf("upstream proxy CONNECT failed: %s", resp.Status)
+	}
+
+	return conn, nil
+}
+
+func basicAuthHeader(userinfo string) string {
+	return base64.StdEncoding.EncodeToString([]byte(userinfo))
 }
 
 func (s *Server) logDecision(dest, action, reason, detail string) {

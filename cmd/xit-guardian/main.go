@@ -14,19 +14,20 @@ import (
 
 func main() {
 	var (
-		listenAddr  = flag.String("listen", "127.0.0.1:0", "Proxy listen address")
-		controlSock = flag.String("control", "", "Unix socket for control API")
-		logPath     = flag.String("log", "", "JSONL audit log path")
+		listenAddr    = flag.String("listen", "127.0.0.1:0", "Proxy listen address")
+		controlSock   = flag.String("control", "", "Unix socket for control API")
+		logPath       = flag.String("log", "", "JSONL audit log path")
+		upstreamProxy = flag.String("upstream-proxy", "", "Upstream proxy URL (e.g. http://proxy.corp:8080)")
 	)
 	flag.Parse()
 
-	// Parse allow/deny lists from remaining args or environment
-	allowList := os.Getenv("XITBOX_ALLOW")
-	denyList := os.Getenv("XITBOX_DENY")
+	// Parse allow/deny lists from environment
+	allowList := os.Getenv("XB_ALLOW")
+	denyList := os.Getenv("XB_DENY")
 
 	rules := guardian.NewRules(split(allowList), split(denyList))
 
-	server, err := guardian.NewServer(*listenAddr, *controlSock, *logPath, rules)
+	server, err := guardian.NewServer(*listenAddr, *controlSock, *logPath, *upstreamProxy, rules)
 	if err != nil {
 		log.Fatalf("create server: %v", err)
 	}

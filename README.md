@@ -1,31 +1,30 @@
-# xitbox
+# xb
 
-> A lightweight, cross-platform sandbox for AI coding agents.
+> A lightweight, cross-platform sandbox for AI coding agents and arbitrary commands.
 > Default-deny network. Default-deny filesystem. One command to run.
 
 [![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://golang.org)
 
 ---
 
-## What is xitbox?
+## What is xb?
 
-**xitbox** runs AI coding agents (Claude Code, Codex, Aider, Gemini, etc.) in ephemeral sandboxes with controlled network and filesystem access. It protects against accidental misuse — agents can't reach public LLM APIs, can't read your SSH keys, and can only touch files you explicitly allow.
-
-**Key idea:** Run any agent with `xitbox <agent>` (or `xitbox run -- <cmd>` for one-offs) and it runs inside a sandbox. When the command exits, the sandbox is gone.
+**xb** runs any command — AI coding agents, `npm install`, `python script.py` — in an ephemeral sandbox with controlled network and filesystem access. It protects against accidental misuse: agents can't reach public LLM APIs, can't read your SSH keys, and can only touch files in your project directory.
 
 ```bash
-# Sandbox Claude Code (or: xitbox codex, xitbox aider, xitbox gemini)
-xitbox claude
+# Sandbox Claude Code (with full auto-permission mode)
+xb claude --dangerously-skip-permissions
 
-# Sandbox a one-off command
-xitbox run -- npm install
+# Sandbox any command
+xb npm install
+xb python script.py
+xb npx @anthropic-ai/claude-code
 
-# Run multiple sandboxes simultaneously
-xitbox run --name frontend -- npm run dev
-xitbox run --name backend -- python server.py
+# Named sandbox
+xb --name frontend npm run dev
 ```
 
-Use `--` to pass flags through to the agent, e.g. `xitbox claude -- --help` or `xitbox gemini -- --version`.
+No `--` separator needed. No agent-specific subcommands to remember. `xb <anything>` sandboxes it.
 
 ---
 
@@ -33,98 +32,73 @@ Use `--` to pass flags through to the agent, e.g. `xitbox claude -- --help` or `
 
 ### Prerequisites
 
-**macOS:**
-```bash
-brew install lima
-```
+**macOS:** No external dependencies. `sandbox-exec` is built in.
 
 **Linux (Ubuntu/Debian):**
 ```bash
-sudo apt install bubblewrap iptables
+sudo apt install bubblewrap
+# For OS-level network enforcement (recommended):
+sudo apt install passt        # pasta (preferred)
+# or: sudo apt install slirp4netns
 ```
 
 **Linux (Fedora/RHEL):**
 ```bash
-sudo dnf install bubblewrap iptables
+sudo dnf install bubblewrap passt
 ```
 
 ### Install
 
-Download the latest release for your platform, or build from source:
-
 ```bash
-git clone https://github.com/elbeanio/xitbox.git
-cd xitbox
+git clone https://github.com/elbeanio/xb.git
+cd xb
 make
-./bin/xitbox --help    # or `make where` to see binary paths
+./bin/xb --help
 ```
 
-### Initialize
+### Run a sandboxed command
 
 ```bash
-./bin/xitbox init
+./bin/xb claude --dangerously-skip-permissions
 ```
 
-This creates your default configuration, detects installed agents, and verifies dependencies.
-
-### Run a sandboxed agent
-
-```bash
-./bin/xitbox claude
-# or equivalently:
-./bin/xitbox run -- claude
-```
-
-The agent starts inside a sandbox. Network access is default-deny. Filesystem access is restricted to your project directory and agent config persistence directories.
-
-On macOS, each agent gets its own dedicated Lima VM (e.g. `xitbox-claude`, `xitbox-gemini`) so credentials and config don't leak between agents. One-off commands share a default VM.
-
-### Allow a blocked domain
-
-When the agent hits a blocked domain, you'll see it in the session overlay (coming in v0.2). For now, add it to the whitelist:
-
-```bash
-# Allow a domain for all future sessions
-./bin/xitbox allow --domain api.example.com
-
-# Allow from the most recent log entry
-./bin/xitbox allow --from-log
-```
+Network is default-deny. Filesystem writes are restricted to your project directory. When the command exits, the sandbox is gone.
 
 ---
 
 ## How It Works
 
-### Architecture
-
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  xitbox CLI                                                  │
-│  ├─ Reads config (default + project + CLI flags)            │
-│  ├─ Starts xit-guardian proxy                                │
-│  ├─ Sets up network namespace + iptables (Linux)             │
-│  ├─ Prepares bubblewrap mount flags                          │
-│  └─ Execs agent inside sandbox                               │
-│                                                              │
-│  xit-guardian (per-sandbox proxy)                            │
-│  ├─ Transparent TCP proxy (iptables REDIRECT on Linux)       │
-│  ├─ TLS SNI extraction (no decryption)                       │
-│  ├─ Domain/CIDR whitelist + LLM blocklist                    │
-│  ├─ JSONL audit logging                                      │
-│  └─ Unix socket control API for live rule updates           │
-└─────────────────────────────────────────────────────────────┘
+sandboxed process
+      │
+      │  all outbound TCP
+      ▼
+ OS enforcement          macOS: Seatbelt (deny all outbound except guardian)
+                         Linux: network namespace (pasta/slirp4netns or relay)
+      │
+      │  only guardian port allowed through
+      ▼
+ xit-guardian proxy      domain allowlist + LLM blocklist + JSONL audit log
+      │                  optionally forwards through upstream_proxy
+      │
+      ▼
+   internet (or corp proxy)
 ```
 
-### Platform Differences
+### Platform Backends
 
 | Feature | Linux | macOS |
 |---------|-------|-------|
-| **Isolation** | Native namespaces (bwrap + unshare) | Lima VM (Alpine Linux) with same stack |
-| **Startup** | ~1 second | ~3 seconds (warm VM) |
-| **Network** | iptables transparent proxy | Same, inside VM |
-| **Filesystem** | bwrap bind mounts | virtiofs + bwrap |
+| **Filesystem isolation** | bubblewrap (bwrap) | Seatbelt (sandbox-exec) |
+| **Network enforcement** | network namespace + iptables DNAT (pasta/slirp4netns) or relay | Seatbelt `(deny network-outbound)` |
+| **Startup time** | <1s | <1s |
+| **Root required** | No | No |
+| **External deps** | bwrap (required), pasta or slirp4netns (recommended) | None |
 
-On macOS, xitbox uses lightweight Lima VMs. Each known agent (`claude`, `codex`, `aider`, `gemini`) gets its own persistent VM so credentials and config are isolated between agents. One-off commands share a default VM. The VM is the sandbox boundary; the host is never directly exposed to the agent.
+**Linux network modes** (tried in order):
+1. **pasta** — transparent proxy via userspace networking + iptables DNAT. Catches all TCP including processes that ignore `HTTP_PROXY` (e.g. JVMs).
+2. **slirp4netns** — same as pasta, older tool.
+3. **Relay** — zero extra deps. Sandbox has no internet at all; only processes that use `HTTP_PROXY` can reach guardian. JVMs and raw-socket code get connection refused.
 
 ---
 
@@ -132,10 +106,10 @@ On macOS, xitbox uses lightweight Lima VMs. Each known agent (`claude`, `codex`,
 
 ### Default Config Location
 
-- **Linux:** `~/.config/xitbox/default.yaml`
-- **macOS:** `~/Library/Application Support/xitbox/default.yaml`
+- **Linux:** `~/.config/xb/default.yaml`
+- **macOS:** `~/Library/Application Support/xb/default.yaml`
 
-### Default Config
+### Personal Config (default)
 
 ```yaml
 network:
@@ -153,19 +127,10 @@ network:
     - pypi.org
     - crates.io
     - golang.org
-    - 140.82.0.0/16
-  log_file: ~/.local/share/xitbox/denied.jsonl
+  log_file: ~/.local/share/xb/denied.jsonl
 
 filesystem:
   cwd: rw
-  agent_persistence:
-    claude: ~/.xitbox/persist/claude
-    gemini: ~/.xitbox/persist/gemini
-
-resources:
-  memory: 4g
-  cpus: 2
-  pids: 4096
 
 env:
   filter: true
@@ -176,9 +141,40 @@ env:
     - OPENAI_API_KEY
 ```
 
+### Corporate Config
+
+```yaml
+network:
+  # Route allowed traffic through your corporate proxy
+  upstream_proxy: http://proxy.corp.internal:8080
+
+  # Corp CA cert for TLS inspection — injected into sandbox env automatically
+  ca_bundle: /etc/corp-ca.pem
+
+  # Env vars to inject with the CA path. Add your own toolchain vars here.
+  ca_bundle_env_vars:
+    - NODE_EXTRA_CA_CERTS    # Node.js (claude, gemini, codex)
+    - REQUESTS_CA_BUNDLE     # Python requests/httpx (aider)
+    - SSL_CERT_FILE          # curl, OpenSSL-linked tools
+    - CURL_CA_BUNDLE         # curl
+    - GIT_SSL_CAINFO         # git
+    - MY_INTERNAL_TOOL_CA    # add anything custom here
+
+  # Block public LLM endpoints — corp proxy handles approved models
+  deny_list:
+    - api.openai.com
+    - api.anthropic.com
+    - generativelanguage.googleapis.com
+
+  # Allow internal endpoints
+  allow:
+    - llm-proxy.corp.internal
+    - registry.corp.internal
+```
+
 ### Per-Project Overrides
 
-Create `.xitbox.yaml` in your project directory:
+Create `.xitbox.yaml` in your project directory. It is merged with the default config and mounted **read-only** inside the sandbox (so the sandboxed process can read it but cannot modify allow rules for future runs):
 
 ```yaml
 network:
@@ -195,68 +191,75 @@ filesystem:
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `xitbox claude [args...]` | Run Claude Code in a sandboxed VM |
-| `xitbox codex [args...]` | Run Codex CLI in a sandboxed VM |
-| `xitbox aider [args...]` | Run Aider in a sandboxed VM |
-| `xitbox gemini [args...]` | Run Gemini CLI in a sandboxed VM |
-| `xitbox run -- <cmd>` | Run any command in an ephemeral sandbox |
-| `xitbox run --name foo -- <cmd>` | Run with a named sandbox |
-| `xitbox init` | Initialize configuration and check dependencies |
-| `xitbox list` | List currently running sandboxes |
-| `xitbox allow --domain <domain>` | Add a domain to the whitelist |
-| `xitbox allow --cidr <range>` | Add a CIDR range to the whitelist |
-| `xitbox allow --from-log` | Allow the most recently blocked destination |
-| `xitbox logs --since 5m` | View blocked connection attempts |
-| `xitbox logs --follow` | Follow log output in real-time |
+```
+xb [flags] <command> [args...]     Run a command inside a sandbox
+xb --allow [flags]                 Manage the network allowlist
+xb --logs [flags]                  View blocked connections
+xb --list                          List running sandboxes
+```
 
-Each agent subcommand accepts the same `--name` flag as `xitbox run` and forwards everything after `--` to the agent itself.
+### Sandbox flags
+
+| Flag | Description |
+|------|-------------|
+| `--name <name>` | Sandbox name (auto-generated if empty) |
+
+### Allow flags (use with `--allow`)
+
+| Flag | Description |
+|------|-------------|
+| `--domain <domain>` | Domain to add, supports wildcards (`*.example.com`) |
+| `--cidr <range>` | CIDR range to add (e.g. `10.0.0.0/8`) |
+| `--from-log` | Add the most recently blocked destination |
+
+### Log flags (use with `--logs`)
+
+| Flag | Description |
+|------|-------------|
+| `--since <duration>` | Show entries from the last duration (e.g. `5m`, `1h`) |
+| `--follow` | Stream log output in real-time |
 
 ---
 
 ## Agent Config Persistence
 
 > **Note: opencode is intentionally not supported.**
-> OpenCode's TUI (built on the `opentui` library) silently exits with code 255 over SSH/VM transports — same symptom as [opencode issues #6119](https://github.com/sst/opencode/issues/6119) and [#24475](https://github.com/sst/opencode/issues/24475). The same problems have been reported upstream on Gnome Terminal and other non-kitty hosts, so the root cause is in the library, not in xitbox. For opencode, run `opencode web` outside xitbox.
+> OpenCode's TUI silently exits with code 255 over SSH/VM transports. Use `opencode web` outside xb.
 
-xitbox automatically detects installed agents and persists their configuration across sandbox runs:
+xb detects known agents by command name and grants write access to their config directories inside the sandbox. Config persists across runs naturally on the host filesystem:
 
-| Agent | Persistent Config Dir |
-|-------|----------------------|
-| Claude Code | `~/.xitbox/persist/claude/` |
-| Codex CLI | `~/.xitbox/persist/codex/` |
-| Aider | `~/.xitbox/persist/aider/` |
-| Cline | `~/.xitbox/persist/cline/` |
-| Gemini CLI | `~/.xitbox/persist/gemini/` |
-
-Inside the sandbox, these are mounted at the agent's expected home directory locations (e.g., `~/.claude/`).
+| Agent | Config Dir |
+|-------|-----------|
+| Claude Code | `~/.claude/` |
+| Codex CLI | `~/.codex/` |
+| Aider | `~/.aider/` |
+| Cline | `~/.cline/` |
+| Gemini CLI | `~/.gemini/` |
 
 ---
 
 ## Security Model
 
 **In scope (accidental misuse):**
-- Agent accidentally reads files outside the project
-- Agent accidentally exfiltrates data to public LLM APIs
+- Agent reads files outside the project
+- Agent exfiltrates data to public LLM APIs
 - Agent installs packages from compromised registries
+- Sandboxed process modifies `.xitbox.yaml` to broaden future allow rules
 
 **Out of scope (determined attacker):**
 - Kernel privilege escalation
 - Sandbox escape via unpatched CVE
-- Side-channel attacks
-
-xitbox uses **process-level sandboxing**, not hardware VMs. A determined attacker with a kernel exploit can escape. For threat models requiring hardware isolation, use a VM-per-sandbox tool like [agentcage](https://github.com/agentcage/agentcage).
+- Malicious `.xitbox.yaml` committed to a repo (visible in code review)
 
 ### Defense Layers
 
 | Layer | Linux | macOS |
 |-------|-------|-------|
-| Mount namespace | bubblewrap | bubblewrap (in VM) |
-| Network namespace | unshare --net | unshare --net (in VM) |
-| Traffic filtering | iptables REDIRECT → guardian | iptables REDIRECT → guardian |
-| LLM blocklist | Built-in deny list | Built-in deny list |
-| VM boundary | N/A | Apple Virtualization.framework |
+| Filesystem isolation | bubblewrap bind mounts | Seatbelt `(deny file-write*)` |
+| Network isolation | network namespace (no direct internet) | Seatbelt `(deny network-outbound)` |
+| Traffic filtering | iptables DNAT → guardian (pasta/slirp4netns) or relay | Seatbelt → guardian |
+| LLM blocklist | guardian deny list | guardian deny list |
+| Project config tamper protection | `.xitbox.yaml` bind-mounted read-only | `.xitbox.yaml` bind-mounted read-only |
 
 ---
 
@@ -265,43 +268,42 @@ xitbox uses **process-level sandboxing**, not hardware VMs. A determined attacke
 ### Project Structure
 
 ```
-xitbox/
+xb/
 ├── cmd/
-│   ├── xitbox/          # Main CLI
-│   └── xit-guardian/    # Proxy daemon
+│   ├── xb/              # Main CLI (stdlib flag, no cobra)
+│   └── xit-guardian/    # Proxy daemon (also embeddable)
 ├── pkg/
-│   ├── config/          # YAML config parsing
-│   ├── guardian/        # Proxy engine, whitelist, logging
+│   ├── config/          # YAML config parsing and merging
+│   ├── guardian/        # Proxy engine, allowlist, logging, upstream proxy
 │   ├── platform/        # OS detection, dependency checking
 │   ├── sandbox/         # Sandbox lifecycle
-│   ├── backend/linux/   # Linux-specific backend
-│   ├── backend/darwin/  # macOS Lima VM backend
+│   │   ├── sandbox.go           # Platform dispatch, Darwin (Seatbelt)
+│   │   ├── sandbox_linux.go     # Linux: pasta / slirp4netns / relay
+│   │   └── sandbox_notlinux.go  # Stub for non-Linux builds
+│   ├── backend/         # Unused legacy backends (to be removed)
 │   └── fs/              # Mount preparation
 ├── docs/
-│   ├── PRODUCT.md       # Product specification
-│   ├── ARCHITECTURE.md  # Architecture document
-│   └── IMPLEMENTATION_PLAN.md
+│   ├── PRODUCT.md
+│   ├── ARCHITECTURE.md
+│   ├── NETWORKING.md
+│   └── CONFIG.md
 └── init/
-    └── lima/            # Lima VM template
+    └── lima/            # Legacy Lima template (unused)
 ```
 
 ### Build
 
-Both binaries are produced under `./bin/`:
-
 ```bash
-make            # build xitbox + xit-guardian into ./bin/
-make xitbox     # build only xitbox
+make            # build xb + xit-guardian into ./bin/
+make xb         # build only xb (CGO_ENABLED=0 — static binary)
 make xit-guardian
 make check      # go vet + go test
-make clean      # remove ./bin/
-make where      # print absolute paths to the built binaries
+make clean
+make where      # print absolute paths to built binaries
 make install    # install to $(HOME)/go/bin (override with INSTALL_DIR=...)
 ```
 
-`xitbox` is the CLI; `xit-guardian` is the standalone proxy daemon (currently
-used as a library by `xitbox`, but also runnable on its own for the future
-transparent-proxy and system-service modes).
+The xb binary is built static (`CGO_ENABLED=0`) so it can be bind-mounted into the bwrap sandbox on Linux for the relay mode.
 
 ---
 
@@ -309,11 +311,11 @@ transparent-proxy and system-service modes).
 
 | Version | Feature |
 |---------|---------|
-| v0.1 | Core sandbox (bwrap, netns, guardian, ephemeral lifecycle) |
-| v0.2 | Session chrome overlay, per-project config, `doctor` command |
-| v0.3 | Interactive allow prompts ("Allow api.example.com? [Y/n]") |
-| v0.4 | Inter-sandbox communication |
-| v0.5 | Apple Container backend for macOS 26+ |
+| v0.1 | Core sandbox: Seatbelt (macOS), bwrap + pasta/relay (Linux), guardian proxy |
+| v0.2 | Session chrome — interactive allow prompts in-terminal |
+| v0.3 | `xb --allow` live-updates running sandbox via control socket |
+| v0.4 | Apple Container backend for macOS 26+ |
+| v0.5 | Inter-sandbox communication |
 | v0.6 | Session-scoped SSH support |
 
 ---
@@ -326,7 +328,7 @@ MIT
 
 - [agentcage](https://github.com/agentcage/agentcage) — Defense-in-depth VM/container sandbox with TLS inspection
 - [greywall](https://github.com/GreyhavenHQ/greywall) — Container-free bwrap/sandbox-exec with live dashboard
-- [hole](https://github.com/lukashornych/hole) — Docker-based sandbox with domain whitelist
+- [hole](https://github.com/lukashornych/hole) — Docker-based sandbox with domain allowlist
 - [clampdown](https://github.com/89luca89/clampdown) — Hardened Podman + Landlock sandbox
 
-xitbox differs in being **Docker-free**, **cross-platform with identical UX**, and **purpose-built for coding agents** with automatic config persistence.
+xb differs in being **Docker-free**, **cross-platform with identical UX**, **purpose-built for coding agents**, and **deployable in corporate environments** with upstream proxy and custom CA support.
