@@ -14,19 +14,20 @@ func DefaultConfig() *Config {
 	return &Config{
 		Network: NetworkConfig{
 			DefaultPolicy: "deny",
-			DenyList: []string{
-				"api.openai.com",
-				"api.anthropic.com",
-				"generativelanguage.googleapis.com",
-				"api.cohere.com",
-				"api.mistral.ai",
-				"api.groq.com",
-				"api.together.xyz",
-			},
+			// DenyList is empty by default — it is an override mechanism for
+			// corporate deployments that want to block specific destinations
+			// even if a user adds them to the allow list. Personal users
+			// typically leave this empty.
+			DenyList: []string{},
 			Allow: []string{
+				// Package registries and dev tooling
 				"github.com",
 				"*.github.com",
 				"raw.githubusercontent.com",
+				"api.github.com",
+				"objects.githubusercontent.com",
+				"codeload.github.com",
+				"140.82.0.0/16",
 				"registry.npmjs.org",
 				"pypi.org",
 				"pythonhosted.org",
@@ -36,10 +37,16 @@ func DefaultConfig() *Config {
 				"proxy.golang.org",
 				"sum.golang.org",
 				"rubygems.org",
-				"api.github.com",
-				"objects.githubusercontent.com",
-				"codeload.github.com",
-				"140.82.0.0/16",
+				// LLM providers — agents need these to function.
+				// Corporate users who want to force routing through an internal
+				// proxy should move these to deny_list in their config.
+				"api.anthropic.com",
+				"api.openai.com",
+				"generativelanguage.googleapis.com",
+				"api.cohere.com",
+				"api.mistral.ai",
+				"api.groq.com",
+				"api.together.xyz",
 			},
 			LogFile: defaultLogPath(),
 			// Default env vars injected when ca_bundle is set.

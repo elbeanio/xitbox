@@ -114,19 +114,23 @@ sandboxed process
 ```yaml
 network:
   default_policy: deny
-  deny_list:
-    - api.openai.com
-    - api.anthropic.com
-    - generativelanguage.googleapis.com
-    - api.cohere.com
-    - api.mistral.ai
+  # deny_list is empty by default — add entries here to block destinations
+  # even if a user adds them to the allow list (corporate enforcement use case)
+  deny_list: []
   allow:
+    # Dev tooling
     - github.com
     - '*.github.com'
     - registry.npmjs.org
     - pypi.org
     - crates.io
     - golang.org
+    # LLM providers — agents need these to function
+    - api.anthropic.com
+    - api.openai.com
+    - generativelanguage.googleapis.com
+    - api.mistral.ai
+    - api.groq.com
   log_file: ~/.local/share/xb/denied.jsonl
 
 filesystem:
@@ -160,7 +164,8 @@ network:
     - GIT_SSL_CAINFO         # git
     - MY_INTERNAL_TOOL_CA    # add anything custom here
 
-  # Block public LLM endpoints — corp proxy handles approved models
+  # Block public LLM endpoints so agents are forced through the corp proxy.
+  # deny_list overrides the allow list — users can't accidentally re-enable these.
   deny_list:
     - api.openai.com
     - api.anthropic.com
