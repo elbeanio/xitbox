@@ -303,14 +303,6 @@ func restoreTTY(saved string) {
 	_ = stty.Run()
 }
 
-// envOr returns the env var value or fallback if unset/empty.
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
 // Cleanup removes the sandbox state directory and stops the guardian.
 func (r *Runtime) Cleanup() {
 	if r.Guardian != nil {
