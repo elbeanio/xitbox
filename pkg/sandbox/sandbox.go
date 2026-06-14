@@ -28,16 +28,15 @@ type Runtime struct {
 	StateDir string
 }
 
-// knownAgents maps command names to their config directories under $HOME.
-//
-// opencode is intentionally NOT listed — its TUI silently exits with code 255
-// over SSH/VM transports (opencode issues #6119, #24475). Use `opencode web`.
-var knownAgents = map[string]string{
-	"claude": ".claude",
-	"aider":  ".aider",
-	"codex":  ".codex",
-	"cline":  ".cline",
-	"gemini": ".gemini",
+// knownAgents maps command names to the home-relative dirs that need write
+// access on macOS (Seatbelt). Agents with multiple data dirs list them all.
+var knownAgents = map[string][]string{
+	"claude":   {".claude"},
+	"aider":    {".aider"},
+	"codex":    {".codex"},
+	"cline":    {".cline"},
+	"gemini":   {".gemini"},
+	"opencode": {".opencode", ".config/opencode"},
 }
 
 // Start creates and runs an ephemeral sandbox, blocking until the command exits.
@@ -179,17 +178,19 @@ func runDarwin(rt *Runtime, cfg *config.Config, command []string, guardianPort s
 		cwd = resolved
 	}
 
-	// Determine which agent config dir (if any) needs write access.
-	agentConfigDir := ""
+	// Collect agent config dirs that need write access.
+	var agentConfigDirs []string
 	if len(command) > 0 {
-		if dotDir, ok := knownAgents[command[0]]; ok {
+		if dotDirs, ok := knownAgents[command[0]]; ok {
 			home, _ := os.UserHomeDir()
-			agentConfigDir = filepath.Join(home, dotDir)
+			for _, d := range dotDirs {
+				agentConfigDirs = append(agentConfigDirs, filepath.Join(home, d))
+			}
 		}
 	}
 
 	// Write a Seatbelt profile to a temp file.
-	profile, err := buildSeatbeltProfile(cwd, agentConfigDir, guardianPort, cfg.Filesystem.AllowWrite, cfg.Filesystem.DenyRead)
+	profile, err := buildSeatbeltProfile(cwd, agentConfigDirs, guardianPort, cfg.Filesystem.AllowWrite, cfg.Filesystem.DenyRead)
 	if err != nil {
 		return fmt.Errorf("build seatbelt profile: %w", err)
 	}
@@ -227,7 +228,7 @@ func runDarwin(rt *Runtime, cfg *config.Config, command []string, guardianPort s
 //   - Allows all reads (tools need their host deps)
 //   - Denies writes outside cwd, agentConfigDir, and /tmp
 //   - Denies all outbound network except to guardian on 127.0.0.1:guardianPort
-func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string, allowWrite, denyRead []string) (string, error) {
+func buildSeatbeltProfile(cwd string, agentConfigDirs []string, guardianPort string, allowWrite, denyRead []string) (string, error) {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString("(allow default)\n")
@@ -250,8 +251,8 @@ func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string, allowWrite, 
 			fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbPath(p))
 		}
 	}
-	if agentConfigDir != "" {
-		fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbPath(agentConfigDir))
+	for _, dir := range agentConfigDirs {
+		fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbPath(dir))
 	}
 
 	// Read denies — protect credential files from the sandboxed process.

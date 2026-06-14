@@ -78,11 +78,13 @@ func DefaultConfig() *Config {
 				"~/.docker/config.json",
 			},
 			AgentPersistence: map[string]string{
-				"claude": defaultPersistPath("claude"),
-				"aider":  defaultPersistPath("aider"),
-				"codex":  defaultPersistPath("codex"),
-				"cline":  defaultPersistPath("cline"),
-				"gemini": defaultPersistPath("gemini"),
+				"claude":          defaultPersistPath("claude"),
+				"aider":           defaultPersistPath("aider"),
+				"codex":           defaultPersistPath("codex"),
+				"cline":           defaultPersistPath("cline"),
+				"gemini":          defaultPersistPath("gemini"),
+				"opencode":        defaultPersistPath("opencode"),
+				"opencode-config": defaultPersistPath("opencode-config"),
 			},
 		},
 		Resources: ResourceConfig{

@@ -153,6 +153,10 @@ func agentHomePath(agent string) string {
 		return "/home/sandbox/.cline"
 	case "gemini":
 		return "/home/sandbox/.gemini"
+	case "opencode":
+		return "/home/sandbox/.opencode"
+	case "opencode-config":
+		return "/home/sandbox/.config/opencode"
 	}
 	return ""
 }
