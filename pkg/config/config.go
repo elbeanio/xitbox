@@ -37,6 +37,9 @@ func DefaultConfig() *Config {
 				"proxy.golang.org",
 				"sum.golang.org",
 				"rubygems.org",
+				// opencode
+				"opencode.ai",
+				"models.dev",
 				// Anthropic auth and API — required for Claude Code login and API calls.
 				"claude.ai",
 				"*.claude.ai",
