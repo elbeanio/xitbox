@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,7 +159,7 @@ func runDarwin(rt *Runtime, cfg *config.Config, command []string, guardianPort s
 	}
 
 	// Write a Seatbelt profile to a temp file.
-	profile, err := buildSeatbeltProfile(cwd, agentConfigDir, guardianPort)
+	profile, err := buildSeatbeltProfile(cwd, agentConfigDir, guardianPort, cfg.Filesystem.AllowWrite, cfg.Filesystem.DenyRead)
 	if err != nil {
 		return fmt.Errorf("build seatbelt profile: %w", err)
 	}
@@ -194,7 +195,7 @@ func runDarwin(rt *Runtime, cfg *config.Config, command []string, guardianPort s
 //   - Allows all reads (tools need their host deps)
 //   - Denies writes outside cwd, agentConfigDir, and /tmp
 //   - Denies all outbound network except to guardian on 127.0.0.1:guardianPort
-func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string) (string, error) {
+func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string, allowWrite, denyRead []string) (string, error) {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString("(allow default)\n")
@@ -206,18 +207,45 @@ func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string) (string, err
 	b.WriteString("(allow file-write* (subpath \"/private/tmp\"))\n")
 	// macOS uses /private/var/folders/<xx>/<...>/T/ for per-process temp files.
 	b.WriteString("(allow file-write* (regex #\"^/private/var/folders/\"))\n")
+	for _, p := range allowWrite {
+		p = expandTildePath(p)
+		info, err := os.Stat(p)
+		if err == nil && !info.IsDir() {
+			// For files use a prefix regex so atomic-write temp files
+			// (e.g. ~/.claude.json.tmp.<pid>.<hash>) are also covered.
+			fmt.Fprintf(&b, "(allow file-write* (regex #\"^%s\"))\n", sbRegexEscape(p))
+		} else {
+			fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbPath(p))
+		}
+	}
 	if agentConfigDir != "" {
 		fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbPath(agentConfigDir))
 	}
 
-	// Network: deny all outbound, allow only the guardian proxy.
-	// This ensures processes that ignore HTTP_PROXY still can't reach the
-	// internet directly — all TCP must go through guardian.
-	b.WriteString("(deny network-outbound)\n")
-	fmt.Fprintf(&b, "(allow network-outbound (remote tcp4 \"localhost:%s\"))\n", guardianPort)
-	// Unix domain sockets are used for macOS system IPC including the DNS
-	// resolver (mDNSResponder), so allow them unconditionally.
-	b.WriteString("(allow network-outbound (remote unix-socket))\n")
+	// Read denies — protect credential files from the sandboxed process.
+	// More specific rules override (allow default), so these take effect
+	// even though the profile starts with a broad allow.
+	for _, p := range denyRead {
+		p = expandTildePath(p)
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			fmt.Fprintf(&b, "(deny file-read* (literal %s))\n", sbPath(p))
+		} else {
+			fmt.Fprintf(&b, "(deny file-read* (subpath %s))\n", sbPath(p))
+		}
+	}
+
+	// Network: no OS-level outbound deny on macOS.
+	//
+	// Seatbelt cannot restrict to specific external hostnames (only * or
+	// localhost are valid in tcp4 rules), and Claude Code's TUI makes
+	// connections on multiple ports using native macOS networking that ignores
+	// HTTP_PROXY. Attempting OS-level network restriction breaks TUI startup.
+	//
+	// Network filtering is enforced via HTTP_PROXY → guardian instead:
+	// agents that respect the proxy (claude, aider, codex, npm, pip…) are
+	// fully filtered and logged; agents that bypass the proxy can reach the
+	// internet directly. This matches the model used by claude-sandbox and
+	// agent-seatbelt, and is the realistic macOS constraint.
 
 	return b.String(), nil
 }
@@ -225,6 +253,23 @@ func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string) (string, err
 // sbPath returns a Seatbelt-quoted path literal.
 func sbPath(p string) string {
 	return `"` + strings.ReplaceAll(p, `"`, `\"`) + `"`
+}
+
+// sbRegexEscape escapes a path for use as a Seatbelt regex prefix.
+// Dots in the path are escaped; the result matches the path and any suffix.
+func sbRegexEscape(p string) string {
+	var out strings.Builder
+	for _, c := range p {
+		switch c {
+		case '.':
+			out.WriteString(`\.`)
+		case '"':
+			out.WriteString(`\"`)
+		default:
+			out.WriteRune(c)
+		}
+	}
+	return out.String()
 }
 
 // sandboxEnv builds the environment for the sandboxed process.
@@ -237,6 +282,11 @@ func sandboxEnv(cfg *config.Config, guardianPort string) []string {
 		"HTTP_PROXY=http://127.0.0.1:"+guardianPort,
 		"HTTPS_PROXY=http://127.0.0.1:"+guardianPort,
 		"NO_PROXY=localhost,127.0.0.1",
+		// Disable agent telemetry inside the sandbox — sandboxed processes
+		// shouldn't be phoning home, and blocked telemetry calls can hang TUIs.
+		"DISABLE_TELEMETRY=1",
+		"DISABLE_ERROR_REPORTING=1",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 	)
 	if ca := expandTildePath(cfg.Network.CABundle); ca != "" {
 		for _, varName := range cfg.Network.CABundleEnvVars {
@@ -338,14 +388,23 @@ func ListRunning() ([]SandboxInfo, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		pidFile := filepath.Join(sandboxDir, entry.Name(), "pid")
-		data, err := os.ReadFile(pidFile)
+		dir := filepath.Join(sandboxDir, entry.Name())
+
+		// Check liveness by dialing the guardian control socket.
+		// A PID check alone is unreliable — PIDs get reused by other processes.
+		sockPath := filepath.Join(dir, "guardian.sock")
+		conn, err := net.DialTimeout("unix", sockPath, 100*time.Millisecond)
 		if err != nil {
+			os.RemoveAll(dir)
 			continue
 		}
+		conn.Close()
+
+		pidFile := filepath.Join(dir, "pid")
+		data, _ := os.ReadFile(pidFile)
 		sandboxes = append(sandboxes, SandboxInfo{
 			Name:    entry.Name(),
-			PID:     string(data),
+			PID:     strings.TrimSpace(string(data)),
 			Created: entry.Name(),
 		})
 	}

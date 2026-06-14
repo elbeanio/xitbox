@@ -19,6 +19,7 @@ func execute(args []string) error {
 	doAllow := fs.Bool("allow", false, "Add a domain or CIDR to the allowlist")
 	doLogs := fs.Bool("logs", false, "View blocked connection attempts")
 	doList := fs.Bool("list", false, "List running sandboxes")
+	doInit := fs.Bool("init", false, "Write default config and exit")
 
 	// --allow sub-flags
 	allowDomain := fs.String("domain", "", "Domain to allow (with --allow)")
@@ -48,6 +49,8 @@ func execute(args []string) error {
 	}
 
 	switch {
+	case *doInit:
+		return runInit()
 	case *doAllow:
 		return runAllow(*allowDomain, *allowCIDR, *allowFromLog)
 	case *doLogs:
@@ -72,6 +75,7 @@ Usage:
   xb --allow [flags]                 Manage the network allowlist
   xb --logs [flags]                  View blocked connections
   xb --list                          List running sandboxes
+  xb --init                          Write default config file
 
 Examples:
   xb claude --dangerously-skip-permissions

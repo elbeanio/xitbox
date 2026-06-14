@@ -26,14 +26,14 @@ func PrepareMounts(cfg *config.Config, cwd string) []MountSpec {
 		Mode:   cfg.Filesystem.CWD,
 	})
 
-	// Re-mount .xitbox.yaml read-only even though the rest of cwd is rw.
+	// Re-mount .xb.yaml read-only even though the rest of cwd is rw.
 	// The sandboxed process can read it (useful) but cannot modify it to
 	// broaden allow rules for future sandbox runs.
-	projectCfg := filepath.Join(cwd, ".xitbox.yaml")
+	projectCfg := filepath.Join(cwd, ".xb.yaml")
 	if _, err := os.Stat(projectCfg); err == nil {
 		mounts = append(mounts, MountSpec{
 			Source: projectCfg,
-			Dest:   "/workspace/.xitbox.yaml",
+			Dest:   "/workspace/.xb.yaml",
 			Mode:   "ro",
 		})
 	}
@@ -137,9 +137,6 @@ func BuildBwrapArgs(mounts []MountSpec, envWhitelist []string) []string {
 
 	// Die with parent
 	args = append(args, "--die-with-parent")
-
-	// New session for non-interactive
-	args = append(args, "--new-session")
 
 	return args
 }

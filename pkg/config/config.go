@@ -37,9 +37,10 @@ func DefaultConfig() *Config {
 				"proxy.golang.org",
 				"sum.golang.org",
 				"rubygems.org",
-				// LLM providers — agents need these to function.
-				// Corporate users who want to force routing through an internal
-				// proxy should move these to deny_list in their config.
+				// Anthropic auth and API — required for Claude Code login and API calls.
+				"claude.ai",
+				"*.claude.ai",
+				"platform.claude.com",
 				"api.anthropic.com",
 				"api.openai.com",
 				"generativelanguage.googleapis.com",
@@ -61,6 +62,21 @@ func DefaultConfig() *Config {
 		},
 		Filesystem: FilesystemConfig{
 			CWD: "rw",
+			AllowWrite: []string{
+				"~/.claude.json",
+			},
+			DenyRead: []string{
+				"~/.ssh",
+				"~/.gnupg",
+				"~/.aws/credentials",
+				"~/.azure",
+				"~/.config/gcloud",
+				"~/.netrc",
+				"~/.bash_history",
+				"~/.zsh_history",
+				"~/.local/share/keyrings",
+				"~/.docker/config.json",
+			},
 			AgentPersistence: map[string]string{
 				"claude": defaultPersistPath("claude"),
 				"aider":  defaultPersistPath("aider"),
@@ -119,6 +135,8 @@ type NetworkConfig struct {
 // FilesystemConfig controls filesystem access.
 type FilesystemConfig struct {
 	CWD              string            `yaml:"cwd"`
+	AllowWrite       []string          `yaml:"allow_write,omitempty"`
+	DenyRead         []string          `yaml:"deny_read,omitempty"`
 	Shares           []ShareConfig     `yaml:"shares,omitempty"`
 	AgentPersistence map[string]string `yaml:"agent_persistence"`
 }
@@ -146,35 +164,93 @@ type EnvConfig struct {
 func Load(projectDir string, overrides map[string]interface{}) (*Config, error) {
 	cfg := DefaultConfig()
 
-	// Load default config if it exists
-	defaultPath := DefaultConfigPath()
-	if _, err := os.Stat(defaultPath); err == nil {
-		data, err := os.ReadFile(defaultPath)
-		if err != nil {
-			return nil, fmt.Errorf("read default config: %w", err)
-		}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parse default config: %w", err)
-		}
+	if _, err := os.Stat(DefaultConfigPath()); err == nil {
+		cfg = loadAndMerge(cfg, DefaultConfigPath())
 	}
-
-	// Load project config if it exists
 	if projectDir != "" {
-		projectPath := filepath.Join(projectDir, ".xb.yaml")
-		if _, err := os.Stat(projectPath); err == nil {
-			data, err := os.ReadFile(projectPath)
-			if err != nil {
-				return nil, fmt.Errorf("read project config: %w", err)
-			}
-			if err := yaml.Unmarshal(data, cfg); err != nil {
-				return nil, fmt.Errorf("parse project config: %w", err)
-			}
+		p := filepath.Join(projectDir, ".xb.yaml")
+		if _, err := os.Stat(p); err == nil {
+			cfg = loadAndMerge(cfg, p)
 		}
 	}
 
 	// TODO: apply CLI overrides
 
 	return cfg, nil
+}
+
+// loadAndMerge reads a YAML file and merges it into base.
+// Scalar fields replace the base value; slice fields are appended (additive).
+// This means users only need to list additional entries in their config,
+// not replicate the built-in defaults.
+func loadAndMerge(base *Config, path string) *Config {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return base
+	}
+	var overlay Config
+	if err := yaml.Unmarshal(data, &overlay); err != nil {
+		return base
+	}
+
+	// Scalar fields: overlay wins when set.
+	if overlay.Network.DefaultPolicy != "" {
+		base.Network.DefaultPolicy = overlay.Network.DefaultPolicy
+	}
+	if overlay.Network.LogFile != "" {
+		base.Network.LogFile = overlay.Network.LogFile
+	}
+	if overlay.Network.UpstreamProxy != "" {
+		base.Network.UpstreamProxy = overlay.Network.UpstreamProxy
+	}
+	if overlay.Network.CABundle != "" {
+		base.Network.CABundle = overlay.Network.CABundle
+	}
+	if overlay.Filesystem.CWD != "" {
+		base.Filesystem.CWD = overlay.Filesystem.CWD
+	}
+	if overlay.Resources.Memory != "" {
+		base.Resources.Memory = overlay.Resources.Memory
+	}
+	if overlay.Resources.CPUs != 0 {
+		base.Resources.CPUs = overlay.Resources.CPUs
+	}
+	if overlay.Resources.PIDs != 0 {
+		base.Resources.PIDs = overlay.Resources.PIDs
+	}
+	if !overlay.Env.Filter {
+		base.Env.Filter = false
+	}
+
+	// Slice fields: additive — append unique entries from the overlay.
+	base.Network.Allow = appendUnique(base.Network.Allow, overlay.Network.Allow...)
+	base.Network.DenyList = appendUnique(base.Network.DenyList, overlay.Network.DenyList...)
+	base.Network.CABundleEnvVars = appendUnique(base.Network.CABundleEnvVars, overlay.Network.CABundleEnvVars...)
+	base.Filesystem.AllowWrite = appendUnique(base.Filesystem.AllowWrite, overlay.Filesystem.AllowWrite...)
+	base.Filesystem.DenyRead = appendUnique(base.Filesystem.DenyRead, overlay.Filesystem.DenyRead...)
+	base.Filesystem.Shares = append(base.Filesystem.Shares, overlay.Filesystem.Shares...)
+	base.Env.Allow = appendUnique(base.Env.Allow, overlay.Env.Allow...)
+
+	// Map fields: overlay keys win.
+	for k, v := range overlay.Filesystem.AgentPersistence {
+		base.Filesystem.AgentPersistence[k] = v
+	}
+
+	return base
+}
+
+func appendUnique(base []string, extras ...string) []string {
+	seen := make(map[string]bool, len(base))
+	for _, v := range base {
+		seen[v] = true
+	}
+	for _, v := range extras {
+		if !seen[v] {
+			base = append(base, v)
+			seen[v] = true
+		}
+	}
+	return base
 }
 
 // SaveDefault writes the config to the default location.
