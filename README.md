@@ -1,7 +1,7 @@
 # xb
 
 > A lightweight, cross-platform sandbox for AI coding agents and arbitrary commands.
-> Default-deny network. Default-deny filesystem. One command to run.
+> Controlled filesystem access. Network filtering via proxy. One command to run.
 
 [![Go Version](https://img.shields.io/badge/go-1.23+-blue.svg)](https://golang.org)
 
@@ -9,7 +9,7 @@
 
 ## What is xb?
 
-**xb** runs any command — AI coding agents, `npm install`, `python script.py` — in an ephemeral sandbox with controlled network and filesystem access. It protects against accidental misuse: agents can't reach public LLM APIs, can't read your SSH keys, and can only touch files in your project directory.
+**xb** runs any command — AI coding agents, `npm install`, `python script.py` — in an ephemeral sandbox with controlled filesystem and network access. It protects against accidental misuse: agents can't read your SSH keys or credentials, can only write files in your project directory, and network traffic is filtered through a local proxy with an allowlist.
 
 ```bash
 # Sandbox Claude Code (with full auto-permission mode)
@@ -53,6 +53,7 @@ sudo dnf install bubblewrap passt
 git clone https://github.com/elbeanio/xb.git
 cd xb
 make
+./bin/xb --init     # write default config
 ./bin/xb --help
 ```
 
@@ -62,7 +63,7 @@ make
 ./bin/xb claude --dangerously-skip-permissions
 ```
 
-Network is default-deny. Filesystem writes are restricted to your project directory. When the command exits, the sandbox is gone.
+Filesystem writes are restricted to your project directory. Network traffic is filtered through the guardian proxy. When the command exits, the sandbox is gone.
 
 ---
 
@@ -71,16 +72,11 @@ Network is default-deny. Filesystem writes are restricted to your project direct
 ```
 sandboxed process
       │
-      │  all outbound TCP
+      │  HTTP_PROXY → guardian (proxy-aware agents)
+      │  direct (native macOS networking / Linux bwrap)
       ▼
- OS enforcement          macOS: Seatbelt (deny all outbound except guardian)
-                         Linux: network namespace (pasta/slirp4netns or relay)
-      │
-      │  only guardian port allowed through
-      ▼
- xit-guardian proxy      domain allowlist + LLM blocklist + JSONL audit log
-      │                  optionally forwards through upstream_proxy
-      │
+ guardian proxy      domain allowlist + JSONL audit log
+      │              optionally forwards through upstream_proxy
       ▼
    internet (or corp proxy)
 ```
@@ -89,34 +85,57 @@ sandboxed process
 
 | Feature | Linux | macOS |
 |---------|-------|-------|
-| **Filesystem isolation** | bubblewrap (bwrap) | Seatbelt (sandbox-exec) |
-| **Network enforcement** | network namespace + iptables DNAT (pasta/slirp4netns) or relay | Seatbelt `(deny network-outbound)` |
+| **Filesystem write isolation** | bubblewrap bind mounts (rw only where allowed) | Seatbelt `(deny file-write*)` |
+| **Credential read protection** | host `~/.ssh`, `~/.aws` etc. not mounted at all | Seatbelt `(deny file-read*)` on specific paths |
+| **Network enforcement** | network namespace + iptables DNAT (pasta/slirp4netns) or relay | `HTTP_PROXY` → guardian (proxy-aware agents only) |
 | **Startup time** | <1s | <1s |
 | **Root required** | No | No |
 | **External deps** | bwrap (required), pasta or slirp4netns (recommended) | None |
 
+### macOS network model
+
+macOS Seatbelt cannot restrict outbound connections to specific external hostnames — only `localhost` and `*` (all) are valid targets in Seatbelt network rules. Attempting to deny all outbound and re-allow specific ports breaks TUI agents that use native macOS networking (which ignores `HTTP_PROXY`).
+
+xb therefore does **not** use Seatbelt for network enforcement on macOS. Instead it relies on `HTTP_PROXY` → guardian:
+
+- Agents that respect the proxy (claude, aider, codex, npm, pip, curl…) are fully filtered and logged by guardian.
+- Agents using native macOS APIs (e.g. Claude Code's auth flow) can reach external hosts directly. This matches the approach used by claude-sandbox and agent-seatbelt.
+
+**Linux has stronger network isolation.** With pasta/slirp4netns, all TCP is redirected to guardian via iptables DNAT regardless of whether the process respects `HTTP_PROXY`. With the relay fallback, processes that ignore `HTTP_PROXY` have no network at all.
+
 **Linux network modes** (tried in order):
-1. **pasta** — transparent proxy via userspace networking + iptables DNAT. Catches all TCP including processes that ignore `HTTP_PROXY` (e.g. JVMs).
-2. **slirp4netns** — same as pasta, older tool.
-3. **Relay** — zero extra deps. Sandbox has no internet at all; only processes that use `HTTP_PROXY` can reach guardian. JVMs and raw-socket code get connection refused.
+1. **pasta** — transparent proxy via userspace networking + iptables DNAT. Catches all TCP including JVMs and raw-socket code.
+2. **slirp4netns** — same, older tool.
+3. **Relay** — zero extra deps. Sandbox has no internet; only `HTTP_PROXY`-aware processes can reach guardian.
 
 ---
 
 ## Configuration
 
-### Default Config Location
+### Init
 
-- **Linux:** `~/.config/xb/default.yaml`
+```bash
+xb --init
+```
+
+Writes the default config to the platform config path and prints instructions for project-level overrides. Safe to run repeatedly — won't overwrite an existing config.
+
+### Config locations
+
 - **macOS:** `~/Library/Application Support/xb/default.yaml`
+- **Linux:** `~/.config/xb/default.yaml`
 
-### Personal Config (default)
+Per-project overrides live in `.xb.yaml` in your project directory.
+
+### Merging behaviour
+
+Config is **additive** across scopes. Slice fields (`allow`, `deny_list`, `allow_write`, `deny_read`, `env.allow`, etc.) are merged — you only need to list your extras in project or user config, not replicate the built-in defaults. Scalar fields (`default_policy`, `cwd`, etc.) are replaced by the most specific scope.
+
+### Personal config (default)
 
 ```yaml
 network:
   default_policy: deny
-  # deny_list is empty by default — add entries here to block destinations
-  # even if a user adds them to the allow list (corporate enforcement use case)
-  deny_list: []
   allow:
     # Dev tooling
     - github.com
@@ -125,27 +144,48 @@ network:
     - pypi.org
     - crates.io
     - golang.org
-    # LLM providers — agents need these to function
+    # Anthropic auth + API
+    - claude.ai
+    - '*.claude.ai'
+    - platform.claude.com
     - api.anthropic.com
+    # Other LLM providers
     - api.openai.com
     - generativelanguage.googleapis.com
     - api.mistral.ai
     - api.groq.com
-  log_file: ~/.local/share/xb/denied.jsonl
 
 filesystem:
   cwd: rw
+  # Extra write paths (macOS only — on Linux these are simply not mounted).
+  # Additive: list only what you need beyond the built-in defaults.
+  allow_write:
+    - ~/.claude.json   # Claude Code atomic-writes its state here
+  # Paths the sandboxed process cannot read (macOS only).
+  # Additive: add entries here to extend the built-in blocklist.
+  deny_read:
+    - ~/.ssh
+    - ~/.gnupg
+    - ~/.aws/credentials
+    - ~/.azure
+    - ~/.config/gcloud
+    - ~/.netrc
+    - ~/.bash_history
+    - ~/.zsh_history
+    - ~/.docker/config.json
 
 env:
   filter: true
   allow:
     - PATH
     - HOME
+    - TERM
+    - LANG
     - ANTHROPIC_API_KEY
     - OPENAI_API_KEY
 ```
 
-### Corporate Config
+### Corporate config
 
 ```yaml
 network:
@@ -154,18 +194,15 @@ network:
 
   # Corp CA cert for TLS inspection — injected into sandbox env automatically
   ca_bundle: /etc/corp-ca.pem
-
-  # Env vars to inject with the CA path. Add your own toolchain vars here.
   ca_bundle_env_vars:
-    - NODE_EXTRA_CA_CERTS    # Node.js (claude, gemini, codex)
-    - REQUESTS_CA_BUNDLE     # Python requests/httpx (aider)
-    - SSL_CERT_FILE          # curl, OpenSSL-linked tools
+    - NODE_EXTRA_CA_CERTS    # Node.js
+    - REQUESTS_CA_BUNDLE     # Python requests/httpx
+    - SSL_CERT_FILE          # curl, OpenSSL
     - CURL_CA_BUNDLE         # curl
     - GIT_SSL_CAINFO         # git
-    - MY_INTERNAL_TOOL_CA    # add anything custom here
+    - MY_INTERNAL_TOOL_CA    # add your own
 
-  # Block public LLM endpoints so agents are forced through the corp proxy.
-  # deny_list overrides the allow list — users can't accidentally re-enable these.
+  # Block public LLM endpoints — deny_list overrides allow_list
   deny_list:
     - api.openai.com
     - api.anthropic.com
@@ -177,9 +214,9 @@ network:
     - registry.corp.internal
 ```
 
-### Per-Project Overrides
+### Per-project overrides
 
-Create `.xitbox.yaml` in your project directory. It is merged with the default config and mounted **read-only** inside the sandbox (so the sandboxed process can read it but cannot modify allow rules for future runs):
+Create `.xb.yaml` in your project directory. It is merged with the default config and mounted **read-only** inside the sandbox so the agent cannot modify its own allow rules.
 
 ```yaml
 network:
@@ -187,6 +224,8 @@ network:
     - api.mycompany.internal
 
 filesystem:
+  allow_write:
+    - ~/some/tool/state
   shares:
     - path: /home/user/shared-lib
       mode: ro
@@ -198,6 +237,7 @@ filesystem:
 
 ```
 xb [flags] <command> [args...]     Run a command inside a sandbox
+xb --init                          Write default config file
 xb --allow [flags]                 Manage the network allowlist
 xb --logs [flags]                  View blocked connections
 xb --list                          List running sandboxes
@@ -228,10 +268,7 @@ xb --list                          List running sandboxes
 
 ## Agent Config Persistence
 
-> **Note: opencode is intentionally not supported.**
-> OpenCode's TUI silently exits with code 255 over SSH/VM transports. Use `opencode web` outside xb.
-
-xb detects known agents by command name and grants write access to their config directories inside the sandbox. Config persists across runs naturally on the host filesystem:
+xb detects known agents by command name and grants write access to their config directories so settings persist across runs:
 
 | Agent | Config Dir |
 |-------|-----------|
@@ -245,26 +282,29 @@ xb detects known agents by command name and grants write access to their config 
 
 ## Security Model
 
-**In scope (accidental misuse):**
-- Agent reads files outside the project
-- Agent exfiltrates data to public LLM APIs
-- Agent installs packages from compromised registries
-- Sandboxed process modifies `.xitbox.yaml` to broaden future allow rules
+### What xb protects against
 
-**Out of scope (determined attacker):**
-- Kernel privilege escalation
-- Sandbox escape via unpatched CVE
-- Malicious `.xitbox.yaml` committed to a repo (visible in code review)
+- Agent writes files outside the project directory
+- Agent reads credential files (`~/.ssh/`, `~/.aws/credentials`, etc.) — macOS
+- Agent exfiltrates data to domains not on the allowlist — for proxy-aware processes
+- Agent modifies `.xb.yaml` to broaden its own allow rules
 
-### Defense Layers
+### What xb does not protect against
+
+- Kernel privilege escalation or sandbox CVEs
+- Agents using native macOS networking bypassing `HTTP_PROXY` (macOS Seatbelt limitation)
+- A malicious `.xb.yaml` committed to a repo (it's in your code review, not hidden)
+- Determined attackers with local access
+
+### Defense layers
 
 | Layer | Linux | macOS |
 |-------|-------|-------|
-| Filesystem isolation | bubblewrap bind mounts | Seatbelt `(deny file-write*)` |
-| Network isolation | network namespace (no direct internet) | Seatbelt `(deny network-outbound)` |
-| Traffic filtering | iptables DNAT → guardian (pasta/slirp4netns) or relay | Seatbelt → guardian |
-| LLM blocklist | guardian deny list | guardian deny list |
-| Project config tamper protection | `.xitbox.yaml` bind-mounted read-only | `.xitbox.yaml` bind-mounted read-only |
+| **Write isolation** | bwrap bind mounts — only mounted paths are writable | Seatbelt `(deny file-write*)` with per-path exceptions |
+| **Credential read protection** | Host home not mounted — `~/.ssh`, `~/.aws` etc. simply absent | Seatbelt `(deny file-read*)` on credential paths |
+| **Network filtering** | iptables DNAT → guardian (all processes) or relay (HTTP_PROXY only) | `HTTP_PROXY` → guardian (proxy-aware processes only) |
+| **Audit log** | guardian JSONL log of all allowed/denied connections | same |
+| **Project config tamper** | `.xb.yaml` bind-mounted read-only | `.xb.yaml` bind-mounted read-only |
 
 ---
 
@@ -285,15 +325,11 @@ xb/
 │   │   ├── sandbox.go           # Platform dispatch, Darwin (Seatbelt)
 │   │   ├── sandbox_linux.go     # Linux: pasta / slirp4netns / relay
 │   │   └── sandbox_notlinux.go  # Stub for non-Linux builds
-│   ├── backend/         # Unused legacy backends (to be removed)
-│   └── fs/              # Mount preparation
-├── docs/
-│   ├── PRODUCT.md
-│   ├── ARCHITECTURE.md
-│   ├── NETWORKING.md
-│   └── CONFIG.md
-└── init/
-    └── lima/            # Legacy Lima template (unused)
+│   └── fs/              # Mount preparation (Linux bind mounts)
+└── docs/
+    ├── ARCHITECTURE.md
+    ├── NETWORKING.md
+    └── CONFIG.md
 ```
 
 ### Build
@@ -335,5 +371,7 @@ MIT
 - [greywall](https://github.com/GreyhavenHQ/greywall) — Container-free bwrap/sandbox-exec with live dashboard
 - [hole](https://github.com/lukashornych/hole) — Docker-based sandbox with domain allowlist
 - [clampdown](https://github.com/89luca89/clampdown) — Hardened Podman + Landlock sandbox
+- [claude-sandbox](https://github.com/kohkimakimoto/claude-sandbox) — Minimal Seatbelt wrapper for Claude Code
+- [agent-seatbelt](https://github.com/CJHwong/agent-seatbelt) — Seatbelt + credential read protection for coding agents
 
-xb differs in being **Docker-free**, **cross-platform with identical UX**, **purpose-built for coding agents**, and **deployable in corporate environments** with upstream proxy and custom CA support.
+xb differs in being **cross-platform with identical UX**, **purpose-built for coding agents**, **deployable in corporate environments** with upstream proxy and custom CA support, and **honest about the macOS network enforcement limitation** rather than silently failing.

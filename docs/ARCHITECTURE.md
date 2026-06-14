@@ -14,12 +14,12 @@
 │  │  xb CLI                                              │   │
 │  │  stdlib flag dispatch — management flags or sandbox  │   │
 │  │                                                      │   │
-│  │  --allow  --logs  --list   xb <command> [args...]    │   │
+│  │  --init  --allow  --logs  --list  xb <command>       │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  xit-guardian (per-sandbox proxy)                    │   │
-│  │  ├─ Allowlist + LLM blocklist                        │   │
+│  │  ├─ Domain allowlist + deny list                     │   │
 │  │  ├─ TLS SNI extraction (no decryption)               │   │
 │  │  ├─ HTTP CONNECT handling                            │   │
 │  │  ├─ Optional upstream proxy (corp proxy chaining)    │   │
@@ -35,7 +35,7 @@
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  Platform backend                                    │   │
 │  │                                                      │   │
-│  │  macOS:  Seatbelt (sandbox-exec) — instant startup   │   │
+│  │  macOS:  Seatbelt (sandbox-exec) — filesystem only  │   │
 │  │  Linux:  bwrap + network namespace                   │   │
 │  │          (pasta / slirp4netns / relay fallback)      │   │
 │  └──────────────────────────────────────────────────────┘   │
@@ -48,7 +48,7 @@
 
 ### 2.1 xb CLI (`cmd/xb/`)
 
-Entry point. Parses args with stdlib `flag` (no cobra). The first non-flag argument is treated as the command to sandbox; management operations use `--allow`, `--logs`, `--list` flags.
+Entry point. Parses args with stdlib `flag` (no cobra). The first non-flag argument is treated as the command to sandbox; management operations use `--init`, `--allow`, `--logs`, `--list` flags.
 
 Also contains the internal relay binary (`--xb-internal-relay PORT SOCKET`) used in Linux relay mode — see §4.3.
 
@@ -66,20 +66,32 @@ See `docs/NETWORKING.md` for full protocol detail.
 
 ### 2.3 macOS backend (`pkg/sandbox/sandbox.go`)
 
-Uses **Seatbelt** (`sandbox-exec`) with a per-run profile written to a temp file:
+Uses **Seatbelt** (`sandbox-exec`) for filesystem isolation. Network filtering is via `HTTP_PROXY` → guardian.
+
+The per-run Seatbelt profile:
 
 ```scheme
 (version 1)
 (allow default)
+
+; Filesystem writes: deny outside safe dirs
 (deny file-write*)
 (allow file-write* (subpath "/path/to/cwd"))
 (allow file-write* (subpath "/path/to/agent-config"))  ; e.g. ~/.claude
 (allow file-write* (subpath "/tmp"))
 (allow file-write* (subpath "/private/tmp"))
 (allow file-write* (regex #"^/private/var/folders/"))
-(deny network-outbound)
-(allow network-outbound (remote tcp4 "localhost:GUARDIAN_PORT"))
-(allow network-outbound (remote unix-socket))   ; macOS system IPC + DNS
+; Extra paths from filesystem.allow_write config
+(allow file-write* (regex #"^/Users/x/\.claude\.json"))  ; covers atomic temp files
+
+; Filesystem reads: deny credential files
+; (more specific rules override the (allow default) above)
+(deny file-read* (subpath "/Users/x/.ssh"))
+(deny file-read* (literal "/Users/x/.aws/credentials"))
+(deny file-read* (subpath "/Users/x/.gnupg"))
+; ... etc from filesystem.deny_read config
+
+; Network: no OS-level deny — see §3 for rationale
 ```
 
 No external dependencies. Instant startup. `sandbox-exec` is built into macOS.
@@ -112,18 +124,25 @@ Three modes, tried in order:
 
 ### macOS
 
+Seatbelt cannot restrict outbound connections to specific external hostnames — only `localhost` and `*` (all) are valid host targets in Seatbelt's `tcp4` network rules. Attempting to deny all outbound and re-allow specific external ports breaks TUI agents that use native macOS networking (which ignores `HTTP_PROXY`).
+
+xb therefore relies entirely on `HTTP_PROXY` → guardian for network filtering on macOS:
+
 ```
 sandboxed process
   │
-  │  (Seatbelt blocks all outbound except localhost:GUARDIAN_PORT)
+  │  HTTP_PROXY=http://127.0.0.1:PORT  (proxy-aware agents)
+  │  direct connection                  (native macOS networking)
   ▼
 guardian on host (127.0.0.1:PORT)
   │
-  │  check allowlist/blocklist
+  │  check allowlist/deny list
   │  optionally forward through upstream_proxy
   ▼
 internet (or corp proxy)
 ```
+
+Agents that respect `HTTP_PROXY` (claude, aider, npm, pip, curl, etc.) are fully filtered and logged. Agents using native macOS APIs for specific operations (e.g. Claude Code's OAuth auth flow) can reach external hosts directly.
 
 ### Linux — pasta/slirp4netns mode
 
@@ -141,6 +160,8 @@ guardian on host (127.0.0.1:PORT)
   ▼
 internet
 ```
+
+All TCP is intercepted regardless of whether the process uses `HTTP_PROXY`.
 
 ### Linux — relay mode
 
@@ -175,12 +196,16 @@ Basic auth is supported: `http://user:pass@proxy.corp.internal:8080`.
 
 ### macOS — Seatbelt
 
-The Seatbelt profile grants:
-- Read access to everything on the host (tools need their system deps)
-- Write access only to: cwd, agent config dir (e.g. `~/.claude`), `/tmp`, macOS temp dirs
-- Network outbound only to guardian port
+The Seatbelt profile:
+- Starts with `(allow default)` — everything readable
+- Denies writes outside: cwd, agent config dir, `/tmp`, macOS temp dirs, and paths in `filesystem.allow_write`
+- Denies reads of credential files listed in `filesystem.deny_read` — these rules are more specific than `(allow default)` so they take effect
 
-No path remapping. The agent writes directly to its real config dir on the host, which persists naturally across runs.
+No path remapping. The agent writes directly to real host paths.
+
+**What the sandboxed process can read:** everything on the host filesystem, except paths in `deny_read` (default: `~/.ssh`, `~/.aws/credentials`, `~/.gnupg`, `~/.netrc`, `~/.bash_history`, `~/.zsh_history`, `~/.azure`, `~/.config/gcloud`, `~/.docker/config.json`).
+
+**What the sandboxed process can write:** cwd, `/tmp`, macOS temp dirs, agent config dir (e.g. `~/.claude`), and any paths in `filesystem.allow_write`.
 
 ### Linux — bwrap mounts
 
@@ -188,7 +213,7 @@ No path remapping. The agent writes directly to its real config dir on the host,
 Sandbox filesystem:
   /workspace      → bind mount: project cwd (rw)
   /tmp            → tmpfs
-  /home/sandbox   → tmpfs
+  /home/sandbox   → tmpfs  ← host home NOT mounted; credentials simply absent
   /dev            → minimal (null, zero, random, urandom, tty)
   /proc           → procfs
   /usr /bin /etc  → bind from host (ro)
@@ -196,11 +221,13 @@ Sandbox filesystem:
   /xb-state       → state dir (rw) — relay mode only
 ```
 
-Agent config directories (`~/.claude`, `~/.gemini`, etc.) are accessible at their real host paths — bwrap maps the host home directory. The agent writes directly to its config dir.
+The host home directory is **never mounted**. `~/.ssh`, `~/.aws`, `~/.gnupg` and similar don't exist inside the sandbox at all. Agent config dirs (e.g. `~/.claude`) are mapped from `~/.xb/persist/<agent>/` into `/home/sandbox/.<agent>/`.
 
-### Project config read-only protection
+The `deny_read` config has no effect on Linux — those paths simply aren't present.
 
-`.xitbox.yaml` in the project directory is bind-mounted **read-only** inside the sandbox, even though the rest of cwd is read-write. This prevents the sandboxed process from modifying allow rules for future sandbox runs.
+### Project config tamper protection
+
+`.xb.yaml` in the project directory is bind-mounted **read-only** inside the sandbox, even though the rest of cwd is read-write. This prevents the sandboxed process from modifying allow rules for future sandbox runs.
 
 ---
 
@@ -209,24 +236,32 @@ Agent config directories (`~/.claude`, `~/.gemini`, etc.) are accessible at thei
 ### Sandbox startup
 
 ```
-1. xb reads config (default + .xitbox.yaml merged)
+1. xb reads config (default + .xb.yaml merged additively)
 2. xb starts guardian on 127.0.0.1:PORT with rules from merged config
-3. macOS: write Seatbelt profile → sandbox-exec -f profile command
+3. macOS: write Seatbelt profile to temp file → sandbox-exec -f profile command
    Linux: detect pasta/slirp4netns → set up network namespace → bwrap command
-4. Sandbox runs. All traffic flows through guardian.
+4. Sandbox runs. Proxy-aware traffic flows through guardian.
 5. On exit: guardian stopped, state dir removed.
 ```
 
-### Blocked connection
+### Blocked connection (proxy-aware agent, both platforms)
 
 ```
-1. Process tries to connect to api.openai.com:443
-2. OS enforcement intercepts (Seatbelt / iptables DNAT / relay)
-3. guardian receives connection request
-4. guardian checks: api.openai.com matches deny list → DENY
-5. For CONNECT requests: guardian sends 403 Forbidden
-6. guardian writes JSONL: {"ts":"...","dest":"api.openai.com:443","action":"deny","reason":"blocklist"}
-7. Process gets connection refused / 403
+1. Process sends CONNECT api.openai.com:443 to HTTP_PROXY (guardian)
+2. guardian checks: api.openai.com not in allowlist → DENY
+3. guardian sends 403 Forbidden
+4. guardian writes JSONL: {"ts":"...","dest":"api.openai.com:443","action":"deny","reason":"not-in-allowlist"}
+5. Process gets 403
+```
+
+### Blocked connection (iptables DNAT, Linux pasta/slirp mode only)
+
+```
+1. Process tries to connect to api.openai.com:443 directly (ignores HTTP_PROXY)
+2. iptables DNAT redirects to guardian
+3. guardian reads SNI from TLS ClientHello → api.openai.com → DENY
+4. guardian sends 403, logs denial
+5. Process gets connection refused / 403
 ```
 
 ### Live allow rule update
@@ -245,26 +280,26 @@ Agent config directories (`~/.claude`, `~/.gemini`, etc.) are accessible at thei
 
 ### Threat model (in scope)
 
-- Agent reads files outside the project directory
-- Agent exfiltrates data to a public LLM API
-- Agent installs a malicious package that phones home
-- Sandboxed process modifies `.xitbox.yaml` to broaden future sessions
+- Agent writes files outside the project directory
+- Agent reads credential files (`~/.ssh`, `~/.aws/credentials`, etc.) — macOS: blocked by `deny_read` rules; Linux: not mounted
+- Agent exfiltrates data to a public domain via `HTTP_PROXY`-aware calls — blocked by guardian
+- Sandboxed process modifies `.xb.yaml` to broaden future sessions — blocked by read-only bind
 
 ### Threat model (out of scope)
 
 - Kernel privilege escalation or CVE-based sandbox escape
-- Side-channel attacks
-- Malicious `.xitbox.yaml` committed to the repo (supply chain — visible in code review, not preventable technically)
+- Exfiltration via native macOS networking that bypasses `HTTP_PROXY` (Seatbelt limitation — see §3)
+- Malicious `.xb.yaml` committed to the repo (supply chain — visible in code review)
 
 ### Defense layers
 
 | Layer | Linux | macOS |
 |-------|-------|-------|
-| Filesystem isolation | bwrap bind mounts | Seatbelt `(deny file-write*)` |
-| Network isolation | network namespace | Seatbelt `(deny network-outbound)` |
-| Traffic filtering | iptables DNAT → guardian | Seatbelt → guardian |
-| LLM blocklist | guardian deny list | guardian deny list |
-| Project config protection | `.xitbox.yaml` ro bind | `.xitbox.yaml` ro bind |
+| **Write isolation** | bwrap bind mounts — only mounted paths writable | Seatbelt `(deny file-write*)` with per-path exceptions |
+| **Credential read protection** | Host home not mounted; credentials absent | Seatbelt `(deny file-read*)` on credential paths |
+| **Network filtering** | iptables DNAT → guardian (all processes, pasta/slirp) or relay (HTTP_PROXY only) | `HTTP_PROXY` → guardian (proxy-aware processes only) |
+| **Audit log** | guardian JSONL | guardian JSONL |
+| **Project config tamper** | `.xb.yaml` ro bind | `.xb.yaml` ro bind |
 
 ---
 
@@ -275,20 +310,21 @@ Multiple sandboxes can run simultaneously. Each gets:
 - Its own network namespace (Linux) or sandbox-exec process (macOS)
 - Its own state directory (`~/.xb/sandboxes/<name>/`)
 
-There is no shared state between running sandboxes. Cleanup is automatic on exit.
+Liveness is determined by whether the guardian control socket is accepting connections — not by PID, which can be reused by other processes. Stale state directories are pruned automatically on `xb --list`.
 
 ---
 
-## 8. Platform Comparison
+## 8. Config Loading
 
-| Concern | Linux | macOS |
-|---------|-------|-------|
-| **Startup time** | <1s | <1s |
-| **Root required** | No | No |
-| **Filesystem isolation** | bwrap | Seatbelt |
-| **Network enforcement** | Network namespace (pasta/slirp/relay) | Seatbelt |
-| **Transparent proxy** | iptables DNAT (with pasta/slirp4netns) | Seatbelt enforces gateway |
-| **External deps** | bwrap + pasta (recommended) | None |
+Config is loaded and **merged additively** across scopes:
+
+1. Built-in defaults (hardcoded in `DefaultConfig()`)
+2. User config (`~/Library/Application Support/xb/default.yaml` or `~/.config/xb/default.yaml`)
+3. Project config (`.xb.yaml` in cwd)
+
+Slice fields (`network.allow`, `network.deny_list`, `filesystem.allow_write`, `filesystem.deny_read`, `env.allow`, etc.) are **appended** — each scope adds to the previous. Scalar fields (`default_policy`, `cwd`, etc.) are replaced by the most specific scope that sets them.
+
+This means project configs only need to list their extras, not replicate the full default.
 
 ---
 
@@ -316,7 +352,8 @@ xb/
 │   ├── xb/
 │   │   ├── main.go          # Entry point + internal relay mode
 │   │   └── cmd/
-│   │       ├── root.go      # Flag dispatch (allow/logs/list vs sandbox)
+│   │       ├── root.go      # Flag dispatch
+│   │       ├── init.go      # --init: write default config
 │   │       ├── sandbox.go   # runSandbox()
 │   │       ├── allow.go     # --allow implementation
 │   │       ├── logs.go      # --logs implementation
@@ -324,10 +361,10 @@ xb/
 │   └── xit-guardian/
 │       └── main.go          # Standalone guardian daemon
 ├── pkg/
-│   ├── config/config.go     # Config types, defaults, YAML loader
+│   ├── config/config.go     # Config types, defaults, additive YAML merge
 │   ├── guardian/
 │   │   ├── proxy.go         # TCP proxy, SNI extraction, upstream proxy dial
-│   │   ├── rules.go         # Allowlist/blocklist engine
+│   │   ├── rules.go         # Allowlist/deny list engine
 │   │   └── control.go       # Unix socket control API
 │   ├── sandbox/
 │   │   ├── sandbox.go       # Start(), Darwin backend (Seatbelt)
@@ -339,5 +376,5 @@ xb/
     ├── ARCHITECTURE.md  (this file)
     ├── NETWORKING.md    # Guardian protocol detail
     ├── PRODUCT.md       # Product strategy
-    └── CONFIG.md        # Config model design notes
+    └── CONFIG.md        # Config reference
 ```
