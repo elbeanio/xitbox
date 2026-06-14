@@ -98,7 +98,7 @@ func Start(name string, cfg *config.Config, info *platform.Info, command []strin
 func watchConfig(server *guardian.Server, cwd string, stop <-chan struct{}) {
 	paths := []string{config.DefaultConfigPath()}
 	if cwd != "" {
-		paths = append(paths, filepath.Join(cwd, ".xitbox.yaml"))
+		paths = append(paths, filepath.Join(cwd, ".xb.yaml"))
 	}
 
 	mtimes := make(map[string]time.Time)
@@ -236,6 +236,14 @@ func buildSeatbeltProfile(cwd, agentConfigDir, guardianPort string, allowWrite, 
 		}
 	}
 
+	// Deny access to the xb sandbox state directory. The sandboxed process has
+	// no legitimate reason to read it, and the guardian control socket lives
+	// there — if reachable, a sandboxed process could add arbitrary allow rules.
+	if home, err := os.UserHomeDir(); err == nil {
+		sandboxesDir := filepath.Join(home, ".xb", "sandboxes")
+		fmt.Fprintf(&b, "(deny file-read* (subpath %s))\n", sbPath(sandboxesDir))
+	}
+
 	// Network: no OS-level outbound deny on macOS.
 	//
 	// Seatbelt cannot restrict to specific external hostnames (only * or
@@ -257,16 +265,19 @@ func sbPath(p string) string {
 	return `"` + strings.ReplaceAll(p, `"`, `\"`) + `"`
 }
 
-// sbRegexEscape escapes a path for use as a Seatbelt regex prefix.
-// Dots in the path are escaped; the result matches the path and any suffix.
+// sbRegexEscape escapes a path for use as a Seatbelt ICU regex prefix.
+// All ICU regex metacharacters are escaped so the path matches literally.
 func sbRegexEscape(p string) string {
 	var out strings.Builder
 	for _, c := range p {
 		switch c {
-		case '.':
-			out.WriteString(`\.`)
 		case '"':
+			// Escape Seatbelt string delimiter.
 			out.WriteString(`\"`)
+		case '.', '\\', '^', '$', '|', '?', '*', '+', '(', ')', '[', ']', '{', '}':
+			// Escape ICU regex metacharacters.
+			out.WriteRune('\\')
+			out.WriteRune(c)
 		default:
 			out.WriteRune(c)
 		}
