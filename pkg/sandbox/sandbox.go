@@ -36,7 +36,13 @@ var knownAgents = map[string][]string{
 	"codex":    {".codex"},
 	"cline":    {".cline"},
 	"gemini":   {".gemini"},
-	"opencode": {".opencode", ".config/opencode"},
+	"opencode": {
+		".opencode",
+		".config/opencode",
+		".local/share/opencode",  // SQLite db, logs, repos cache
+		".local/state/opencode",  // server.json registration — daemon won't start without this
+		".cache/opencode",        // npm binary cache
+	},
 }
 
 // Start creates and runs an ephemeral sandbox, blocking until the command exits.

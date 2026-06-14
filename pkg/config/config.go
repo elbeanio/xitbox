@@ -85,6 +85,9 @@ func DefaultConfig() *Config {
 				"gemini":          defaultPersistPath("gemini"),
 				"opencode":        defaultPersistPath("opencode"),
 				"opencode-config": defaultPersistPath("opencode-config"),
+				"opencode-data":   defaultPersistPath("opencode-data"),
+				"opencode-state":  defaultPersistPath("opencode-state"),
+				"opencode-cache":  defaultPersistPath("opencode-cache"),
 			},
 		},
 		Resources: ResourceConfig{

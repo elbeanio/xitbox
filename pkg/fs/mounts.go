@@ -157,6 +157,12 @@ func agentHomePath(agent string) string {
 		return "/home/sandbox/.opencode"
 	case "opencode-config":
 		return "/home/sandbox/.config/opencode"
+	case "opencode-data":
+		return "/home/sandbox/.local/share/opencode"
+	case "opencode-state":
+		return "/home/sandbox/.local/state/opencode"
+	case "opencode-cache":
+		return "/home/sandbox/.cache/opencode"
 	}
 	return ""
 }
