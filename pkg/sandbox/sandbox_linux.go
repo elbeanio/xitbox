@@ -113,6 +113,8 @@ HTTP_PROXY=http://%s:%s HTTPS_PROXY=http://%s:%s NO_PROXY=localhost,127.0.0.1 ex
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 	rt.Cmd = cmd
+	stopSig := forwardSignals(cmd)
+	defer stopSig()
 
 	savedTTY := saveTTY()
 	defer restoreTTY(savedTTY)
@@ -236,6 +238,8 @@ func runLinuxRelay(rt *Runtime, cfg *config.Config, command []string, guardianPo
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 	rt.Cmd = cmd
+	stopSig := forwardSignals(cmd)
+	defer stopSig()
 
 	savedTTY := saveTTY()
 	defer restoreTTY(savedTTY)

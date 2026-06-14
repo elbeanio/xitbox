@@ -5,9 +5,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/iangeorge/xitbox/pkg/config"
@@ -145,6 +147,27 @@ func watchConfig(server *guardian.Server, cwd string, stop <-chan struct{}) {
 
 // runLinux is implemented in sandbox_linux.go (Linux) and sandbox_notlinux.go (others).
 
+// forwardSignals starts a goroutine that forwards SIGTERM and SIGINT to cmd.
+// Returns a stop function that must be called when the command exits.
+// This ensures that killing xb directly (e.g. `kill <pid>`) also terminates
+// the sandboxed child and allows the normal cleanup path to run.
+func forwardSignals(cmd *exec.Cmd) func() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	done := make(chan struct{})
+	go func() {
+		defer signal.Stop(sigCh)
+		select {
+		case sig := <-sigCh:
+			if cmd.Process != nil {
+				cmd.Process.Signal(sig)
+			}
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
 // runDarwin runs the command on macOS using sandbox-exec (Seatbelt) for
 // filesystem isolation and the guardian proxy for network filtering.
 func runDarwin(rt *Runtime, cfg *config.Config, command []string, guardianPort string) error {
@@ -188,6 +211,8 @@ func runDarwin(rt *Runtime, cfg *config.Config, command []string, guardianPort s
 	cmd.Stderr = os.Stderr
 	cmd.Env = sandboxEnv(cfg, guardianPort)
 	rt.Cmd = cmd
+	stopSig := forwardSignals(cmd)
+	defer stopSig()
 
 	savedTTY := saveTTY()
 	defer restoreTTY(savedTTY)
