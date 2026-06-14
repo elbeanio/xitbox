@@ -179,6 +179,19 @@ func Load(projectDir string, overrides map[string]interface{}) (*Config, error) 
 	return cfg, nil
 }
 
+// LoadUserOnly reads the user config file without merging with built-in defaults.
+// Returns an empty Config if the file doesn't exist.
+// Used by --allow to persist only user additions, not the full merged config.
+func LoadUserOnly() *Config {
+	var cfg Config
+	data, err := os.ReadFile(DefaultConfigPath())
+	if err != nil {
+		return &cfg
+	}
+	_ = yaml.Unmarshal(data, &cfg)
+	return &cfg
+}
+
 // loadAndMerge reads a YAML file and merges it into base.
 // Scalar fields replace the base value; slice fields are appended (additive).
 // This means users only need to list additional entries in their config,

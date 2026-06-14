@@ -20,6 +20,7 @@ func execute(args []string) error {
 	doLogs := fs.Bool("logs", false, "View blocked connection attempts")
 	doList := fs.Bool("list", false, "List running sandboxes")
 	doInit := fs.Bool("init", false, "Write default config and exit")
+	doDoctor := fs.Bool("doctor", false, "Check dependencies and configuration")
 
 	// --allow sub-flags
 	allowDomain := fs.String("domain", "", "Domain to allow (with --allow)")
@@ -29,9 +30,6 @@ func execute(args []string) error {
 	// --logs sub-flags
 	logsSince := fs.String("since", "", "Show entries since duration, e.g. 5m, 1h (with --logs)")
 	logsFollow := fs.Bool("follow", false, "Follow log output in real-time (with --logs)")
-
-	// Sandbox flags
-	sandboxName := fs.String("name", "", "Sandbox name (auto-generated if empty)")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -49,6 +47,8 @@ func execute(args []string) error {
 	}
 
 	switch {
+	case *doDoctor:
+		return runDoctor()
 	case *doInit:
 		return runInit()
 	case *doAllow:
@@ -63,7 +63,7 @@ func execute(args []string) error {
 			printHelp(fs)
 			return nil
 		}
-		return runSandbox(*sandboxName, command)
+		return runSandbox("", command)
 	}
 }
 
@@ -76,18 +76,15 @@ Usage:
   xb --logs [flags]                  View blocked connections
   xb --list                          List running sandboxes
   xb --init                          Write default config file
+  xb --doctor                        Check dependencies and configuration
 
 Examples:
   xb claude --dangerously-skip-permissions
   xb npm install
-  xb --name myproject python script.py
   xb --allow --domain api.mycompany.internal
   xb --allow --from-log
   xb --logs --since 5m
   xb --logs --follow
-
-Sandbox flags:
-  --name string     Sandbox name (auto-generated if empty)
 
 Allow flags (require --allow):
   --domain string   Domain to add, supports wildcards (*.example.com)

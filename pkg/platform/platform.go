@@ -72,8 +72,9 @@ func detectDeps() []Dependency {
 	if runtime.GOOS == "linux" {
 		deps = append(deps, check("bwrap", true, "sudo apt install bubblewrap  # or: sudo dnf install bubblewrap"))
 		deps = append(deps, check("iptables", true, "usually pre-installed; sudo apt install iptables"))
+		deps = append(deps, check("pasta", false, "sudo apt install passt  # or: sudo dnf install passt"))
+		deps = append(deps, check("slirp4netns", false, "sudo apt install slirp4netns"))
 		deps = append(deps, check("unshare", false, "usually part of util-linux"))
-		deps = append(deps, check("socat", false, "sudo apt install socat"))
 	} else if runtime.GOOS == "darwin" {
 		// sandbox-exec is built into macOS — no external deps needed.
 		deps = append(deps, check("sandbox-exec", true, "built into macOS; should always be present"))
@@ -123,6 +124,23 @@ func persistDir() string {
 func sandboxDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".xb", "sandboxes")
+}
+
+// LinuxNetMode returns the network enforcement mode that will be used on Linux.
+// Mirrors the fallback order in sandbox_linux.go.
+func (i *Info) LinuxNetMode() string {
+	if i.OS != "linux" {
+		return ""
+	}
+	for _, d := range i.Deps {
+		if d.Name == "pasta" && d.Found {
+			return "pasta (transparent proxy)"
+		}
+		if d.Name == "slirp4netns" && d.Found {
+			return "slirp4netns (transparent proxy)"
+		}
+	}
+	return "relay (HTTP_PROXY only — install pasta for full enforcement)"
 }
 
 // EnsureDirs creates the xb directories if they don't exist.

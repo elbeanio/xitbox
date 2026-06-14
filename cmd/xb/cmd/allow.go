@@ -14,7 +14,8 @@ import (
 )
 
 func runAllow(domain, cidr string, fromLog bool) error {
-	cfg, err := config.Load("", nil)
+	// Load full merged config for duplicate checking and log path.
+	merged, err := config.Load("", nil)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -27,7 +28,7 @@ func runAllow(domain, cidr string, fromLog bool) error {
 	case cidr != "":
 		value, kind = cidr, "cidr"
 	case fromLog:
-		v, err := lastBlockedFromLog(cfg.Network.LogFile)
+		v, err := lastBlockedFromLog(merged.Network.LogFile)
 		if err != nil {
 			return err
 		}
@@ -44,15 +45,18 @@ func runAllow(domain, cidr string, fromLog bool) error {
 		return fmt.Errorf("specify --domain, --cidr, or --from-log")
 	}
 
-	for _, existing := range cfg.Network.Allow {
+	for _, existing := range merged.Network.Allow {
 		if existing == value {
 			fmt.Printf("%s is already in the allowlist\n", value)
 			return nil
 		}
 	}
 
-	cfg.Network.Allow = append(cfg.Network.Allow, value)
-	if err := cfg.SaveDefault(); err != nil {
+	// Load only the user config file (not merged with built-in defaults) so
+	// SaveDefault doesn't write all the defaults back into the user's file.
+	userCfg := config.LoadUserOnly()
+	userCfg.Network.Allow = append(userCfg.Network.Allow, value)
+	if err := userCfg.SaveDefault(); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 
@@ -66,13 +70,17 @@ func runAllow(domain, cidr string, fromLog bool) error {
 	return nil
 }
 
-// liveUpdateRunning sends an add_allow or add_deny to every running sandbox's
-// guardian control socket. Returns the number of sandboxes successfully updated.
+// liveUpdateRunning sends an add_allow or add_deny to the sandbox running in
+// the current directory. Returns the number of sandboxes successfully updated.
+// If no sandbox is running in the current directory, does nothing and returns 0
+// (the caller prints a hint about no running sandboxes).
 func liveUpdateRunning(value, kind string) int {
 	sandboxes, err := sandbox.ListRunning()
 	if err != nil || len(sandboxes) == 0 {
 		return 0
 	}
+
+	cwd, _ := os.Getwd()
 
 	action := "add_allow"
 	if kind == "deny" {
@@ -81,6 +89,9 @@ func liveUpdateRunning(value, kind string) int {
 
 	updated := 0
 	for _, sb := range sandboxes {
+		if !sandbox.CWDMatches(sb, cwd) {
+			continue
+		}
 		sockPath := sandbox.ControlSockPath(sb.Name)
 		resp, err := guardian.SendControl(sockPath, guardian.ControlRequest{
 			Action: action,
@@ -89,7 +100,11 @@ func liveUpdateRunning(value, kind string) int {
 		if err != nil || !resp.OK {
 			continue
 		}
-		fmt.Printf("  live-updated sandbox %q\n", sb.Name)
+		label := sb.CWD
+		if sb.Command != "" {
+			label = sb.Command + " in " + sb.CWD
+		}
+		fmt.Printf("  live-updated %s\n", label)
 		updated++
 	}
 	return updated

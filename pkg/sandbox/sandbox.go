@@ -69,13 +69,15 @@ func Start(name string, cfg *config.Config, info *platform.Info, command []strin
 	}
 	rt.Guardian = server
 
-	pidFile := filepath.Join(stateDir, "pid")
-	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0644); err != nil {
-		return nil, fmt.Errorf("write pid file: %w", err)
+	cwd, _ := os.Getwd()
+
+	os.WriteFile(filepath.Join(stateDir, "pid"), []byte(strconv.Itoa(os.Getpid())), 0644)
+	os.WriteFile(filepath.Join(stateDir, "cwd"), []byte(cwd), 0644)
+	if len(command) > 0 {
+		os.WriteFile(filepath.Join(stateDir, "command"), []byte(command[0]), 0644)
 	}
 
 	// Watch config files for changes and hot-reload guardian rules.
-	cwd, _ := os.Getwd()
 	watchStop := make(chan struct{})
 	go watchConfig(server, cwd, watchStop)
 
@@ -363,6 +365,18 @@ func (r *Runtime) Cleanup() {
 	}
 }
 
+// abbreviateHome replaces the home directory prefix with ~ for display.
+func abbreviateHome(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
 // ControlSockPath returns the guardian control socket path for a sandbox.
 func ControlSockPath(name string) string {
 	return filepath.Join(fs.SandboxDir(name), "guardian.sock")
@@ -400,12 +414,14 @@ func ListRunning() ([]SandboxInfo, error) {
 		}
 		conn.Close()
 
-		pidFile := filepath.Join(dir, "pid")
-		data, _ := os.ReadFile(pidFile)
+		pid, _ := os.ReadFile(filepath.Join(dir, "pid"))
+		cwd, _ := os.ReadFile(filepath.Join(dir, "cwd"))
+		command, _ := os.ReadFile(filepath.Join(dir, "command"))
 		sandboxes = append(sandboxes, SandboxInfo{
 			Name:    entry.Name(),
-			PID:     strings.TrimSpace(string(data)),
-			Created: entry.Name(),
+			PID:     strings.TrimSpace(string(pid)),
+			CWD:     abbreviateHome(strings.TrimSpace(string(cwd))),
+			Command: strings.TrimSpace(string(command)),
 		})
 	}
 	return sandboxes, nil
@@ -415,6 +431,26 @@ func ListRunning() ([]SandboxInfo, error) {
 type SandboxInfo struct {
 	Name    string
 	PID     string
-	Status  string
-	Created string
+	Command string
+	CWD     string
+}
+
+// CWDMatches reports whether sb is running in the given working directory.
+// sb.CWD may be abbreviated with ~; cwd should be an absolute path.
+func CWDMatches(sb SandboxInfo, cwd string) bool {
+	sbCWD := sb.CWD
+	if len(sbCWD) > 0 && sbCWD[0] == '~' {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			sbCWD = filepath.Join(home, sbCWD[1:])
+		}
+	}
+	// Resolve symlinks so /private/var/... == /var/... on macOS.
+	if resolved, err := filepath.EvalSymlinks(sbCWD); err == nil {
+		sbCWD = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+	return sbCWD == cwd
 }

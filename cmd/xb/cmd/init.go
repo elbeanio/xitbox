@@ -32,5 +32,7 @@ func runInit() error {
 	fmt.Println()
 	fmt.Println("project config is additive — you only need to list the extras,")
 	fmt.Println("not replicate the full default.")
+	fmt.Println()
+	fmt.Println("run xb --doctor to verify dependencies and config are correct.")
 	return nil
 }
