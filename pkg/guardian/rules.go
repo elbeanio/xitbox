@@ -3,6 +3,7 @@ package guardian
 import (
 	"net"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -18,6 +19,7 @@ type Rules struct {
 type Rule struct {
 	Type  string // "domain", "cidr"
 	Value string
+	Port  int        // 0 = any port; non-zero = exact port match only
 	Net   *net.IPNet // parsed CIDR
 }
 
@@ -67,7 +69,7 @@ func (r *Rules) addRule(list *[]Rule, value string) {
 		return
 	}
 
-	// Check if it's a CIDR
+	// Check if it's a CIDR (contains /)
 	if strings.Contains(value, "/") {
 		_, ipnet, err := net.ParseCIDR(value)
 		if err == nil {
@@ -76,8 +78,18 @@ func (r *Rules) addRule(list *[]Rule, value string) {
 		}
 	}
 
-	// Otherwise it's a domain
-	*list = append(*list, Rule{Type: "domain", Value: strings.ToLower(value)})
+	// Check for optional port suffix: "domain:port"
+	// Use LastIndex so IPv6 literals (if ever used without CIDR) aren't split badly.
+	var port int
+	domain := strings.ToLower(value)
+	if idx := strings.LastIndex(value, ":"); idx > 0 {
+		if p, err := strconv.Atoi(value[idx+1:]); err == nil && p > 0 && p <= 65535 {
+			port = p
+			domain = strings.ToLower(value[:idx])
+		}
+	}
+
+	*list = append(*list, Rule{Type: "domain", Value: domain, Port: port})
 }
 
 // Check evaluates a destination against the rules.
@@ -114,6 +126,11 @@ func (r *Rules) matches(rule Rule, host string, port int) bool {
 		if ip != nil && rule.Net != nil {
 			return rule.Net.Contains(ip)
 		}
+		return false
+	}
+
+	// Port check: if the rule specifies a port, the request must match it.
+	if rule.Port != 0 && rule.Port != port {
 		return false
 	}
 

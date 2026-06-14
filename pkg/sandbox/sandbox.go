@@ -41,7 +41,7 @@ var knownAgents = map[string]string{
 // Start creates and runs an ephemeral sandbox, blocking until the command exits.
 func Start(name string, cfg *config.Config, info *platform.Info, command []string) (*Runtime, error) {
 	if name == "" {
-		name = fmt.Sprintf("sandbox-%d", time.Now().Unix())
+		name = fmt.Sprintf("sandbox-%d", os.Getpid())
 	}
 
 	stateDir := fs.SandboxDir(name)
@@ -67,6 +67,11 @@ func Start(name string, cfg *config.Config, info *platform.Info, command []strin
 	if err := server.Start(); err != nil {
 		return nil, fmt.Errorf("start guardian: %w", err)
 	}
+	commandName := ""
+	if len(command) > 0 {
+		commandName = command[0]
+	}
+	server.SetMeta(name, commandName)
 	rt.Guardian = server
 
 	cwd, _ := os.Getwd()

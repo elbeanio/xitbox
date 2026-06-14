@@ -28,6 +28,9 @@ func TestRulesCheck(t *testing.T) {
 		{"console.anthropic.com", 443, "deny", "blocklist"},
 		{"evil.com", 443, "deny", "not-in-allowlist"},
 		{"", 443, "deny", "empty-host"},
+		// Port-agnostic rules allow any port
+		{"github.com", 22, "allow", "whitelist"},
+		{"github.com", 8080, "allow", "whitelist"},
 	}
 
 	for _, tt := range tests {
@@ -37,6 +40,35 @@ func TestRulesCheck(t *testing.T) {
 		}
 		if reason != tt.reason {
 			t.Errorf("Check(%q, %d) reason = %q, want %q", tt.host, tt.port, reason, tt.reason)
+		}
+	}
+}
+
+func TestPortRestrictedRules(t *testing.T) {
+	r := NewRules([]string{
+		"api.corp.internal:443",
+		"git.corp.internal:22",
+		"*.corp.internal:8080",
+	}, nil)
+
+	tests := []struct {
+		host string
+		port int
+		want string
+	}{
+		{"api.corp.internal", 443, "allow"},
+		{"api.corp.internal", 80, "deny"},   // wrong port
+		{"api.corp.internal", 22, "deny"},   // wrong port
+		{"git.corp.internal", 22, "allow"},
+		{"git.corp.internal", 443, "deny"},  // wrong port
+		{"svc.corp.internal", 8080, "allow"},
+		{"svc.corp.internal", 443, "deny"},  // wrong port
+	}
+
+	for _, tt := range tests {
+		action, _ := r.Check(tt.host, tt.port)
+		if action != tt.want {
+			t.Errorf("Check(%q, %d) = %q, want %q", tt.host, tt.port, action, tt.want)
 		}
 	}
 }

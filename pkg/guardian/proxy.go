@@ -25,6 +25,8 @@ type Server struct {
 	controlSock   string
 	logPath       string
 	upstreamProxy string // optional corporate proxy, e.g. http://proxy.corp:8080
+	sandboxName   string // included in log entries for correlation
+	command       string // included in log entries for correlation
 	rules         *Rules
 	logFile       *os.File
 	logMu         sync.Mutex
@@ -57,7 +59,7 @@ func (s *Server) Start() error {
 		if err := os.MkdirAll(filepath.Dir(s.logPath), 0755); err != nil {
 			return fmt.Errorf("create log dir: %w", err)
 		}
-		f, err := os.OpenFile(s.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(s.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
 			return fmt.Errorf("open log file: %w", err)
 		}
@@ -143,6 +145,13 @@ func (s *Server) Stop() error {
 		s.logFile.Close()
 	}
 	return nil
+}
+
+// SetMeta sets the sandbox name and command included in log entries.
+// Call after Start() to annotate log output for correlation across sandboxes.
+func (s *Server) SetMeta(sandboxName, command string) {
+	s.sandboxName = sandboxName
+	s.command = command
 }
 
 // ReplaceRules atomically replaces the guardian's allow and deny lists.
@@ -337,6 +346,8 @@ func (s *Server) logDecision(dest, action, reason, detail string) {
 	}
 	entry := LogEntry{
 		Timestamp: time.Now().UTC(),
+		Sandbox:   s.sandboxName,
+		Command:   s.command,
 		Dest:      dest,
 		Action:    action,
 		Reason:    reason,
@@ -355,6 +366,8 @@ func (s *Server) logDecision(dest, action, reason, detail string) {
 // LogEntry is a single audit log record.
 type LogEntry struct {
 	Timestamp time.Time `json:"ts"`
+	Sandbox   string    `json:"sandbox,omitempty"`
+	Command   string    `json:"command,omitempty"`
 	Dest      string    `json:"dest"`
 	Action    string    `json:"action"` // "allow" or "deny"
 	Reason    string    `json:"reason"`
