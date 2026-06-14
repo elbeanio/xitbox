@@ -74,6 +74,7 @@ func detectDeps() []Dependency {
 		deps = append(deps, check("iptables", true, "usually pre-installed; sudo apt install iptables"))
 		deps = append(deps, check("pasta", false, "sudo apt install passt  # or: sudo dnf install passt"))
 		deps = append(deps, check("slirp4netns", false, "sudo apt install slirp4netns"))
+		deps = append(deps, check("systemd-run", false, "part of systemd; enables cgroup resource limits"))
 		deps = append(deps, check("unshare", false, "usually part of util-linux"))
 	} else if runtime.GOOS == "darwin" {
 		// sandbox-exec is built into macOS — no external deps needed.

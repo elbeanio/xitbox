@@ -107,7 +107,7 @@ HTTP_PROXY=http://%s:%s HTTPS_PROXY=http://%s:%s NO_PROXY=localhost,127.0.0.1 ex
 	)
 	bwrapArgs = append(bwrapArgs, command...)
 
-	cmd := exec.Command(bwrapPath, bwrapArgs...)
+	cmd := cgroupsWrap(exec.Command(bwrapPath, bwrapArgs...), cfg)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -230,7 +230,7 @@ func runLinuxRelay(rt *Runtime, cfg *config.Config, command []string, guardianPo
 	)
 	bwrapArgs = append(bwrapArgs, command...)
 
-	cmd := exec.Command(bwrapPath, bwrapArgs...)
+	cmd := cgroupsWrap(exec.Command(bwrapPath, bwrapArgs...), cfg)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
